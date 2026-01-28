@@ -140,7 +140,10 @@ const callAI = async (
 };
 
 const extractHeading = (htmlContent) => {
-    const $ = cheerio.load(htmlContent);
+    const $ = cheerio.load(htmlContent, {
+        xmlMode: true,
+        decodeEntities: false,
+    });
     let heading = $("h1, h2").first();
     if (heading.length > 0) return heading.text().replace(/\s+/g, " ").trim();
     const titleTag = $("title").text();
@@ -198,8 +201,12 @@ const planTranslationOrder = async (chapters) => {
     }
 };
 
+// =================== 6. 核心翻译逻辑 (增强错误处理) ===================
 const translateHtmlContent = async (htmlContent, chapterTitle) => {
-    const $ = cheerio.load(htmlContent);
+    const $ = cheerio.load(htmlContent, {
+        xmlMode: true,
+        decodeEntities: false,
+    });
 
     const nodesToTranslate = [];
     $("p, li, h1, h2, h3, h4, h5, h6, caption, title").each((i, el) => {
@@ -238,12 +245,12 @@ const translateHtmlContent = async (htmlContent, chapterTitle) => {
 
     for (const batch of batches) {
         let batchSuccess = false;
-        let batchAttempts = 0;
-        const MAX_BATCH_ATTEMPTS = 3;
+        let attempts = 0;
+        const MAX_ATTEMPTS = 3;
 
-        while (!batchSuccess && batchAttempts < MAX_BATCH_ATTEMPTS) {
+        while (!batchSuccess && attempts < MAX_ATTEMPTS) {
             try {
-                batchAttempts++;
+                attempts++;
                 const currentGlossaryPrompt = await glossaryMutex.runExclusive(
                     () => getGlossaryPrompt(),
                 );
@@ -267,22 +274,43 @@ ${currentGlossaryPrompt}
 
                 const rawResponse = await callAI(batchInput, prompt, false);
 
+                // 核心重构：不仅检查 API 报错，还要校验返回的格式是否完整
+                const matchedResults = new Map();
+                let nodesFoundCount = 0;
+
                 for (const node of batch) {
                     const nodeRegex = new RegExp(
                         `<node id="${node.id}">([\\s\\S]*?)<\/node>`,
                         "i",
                     );
                     const match = rawResponse.match(nodeRegex);
-
                     if (match && match[1]) {
+                        matchedResults.set(node.id, match[1].trim());
+                        nodesFoundCount++;
+                    }
+                }
+
+                // 校验：如果返回的节点数量严重不足，视为翻译格式损坏，触发重试
+                if (nodesFoundCount < batch.length * 0.8) {
+                    throw new Error(
+                        `AI response format corrupted. Found ${nodesFoundCount}/${batch.length} nodes.`,
+                    );
+                }
+
+                // 成功解析后的应用
+                for (const node of batch) {
+                    const translatedText = matchedResults.get(node.id);
+                    if (translatedText) {
                         $(`[data-t-id="${node.id}"]`)
-                            .html(match[1].trim())
+                            .html(translatedText)
                             .removeAttr("data-t-id");
                     } else {
+                        // 没翻译成功的个别节点，保留原文，清除 ID 属性
                         $(`[data-t-id="${node.id}"]`).removeAttr("data-t-id");
                     }
                 }
 
+                // 词汇表解析
                 const glossaryMatch = rawResponse.match(
                     /<glossary>([\s\S]*?)<\/glossary>/i,
                 );
@@ -292,23 +320,34 @@ ${currentGlossaryPrompt}
                             .replace(/```json|```/g, "")
                             .trim();
                         const newTerms = JSON.parse(jsonStr);
-
                         if (Object.keys(newTerms).length > 0) {
                             Object.assign(allNewTerms, newTerms);
                             await glossaryMutex.runExclusive(() => {
                                 Object.assign(RUNTIME_GLOSSARY, newTerms);
                             });
                         }
-                    } catch (e) {}
+                    } catch (e) {
+                        console.warn(
+                            "      ⚠️ Glossary parse failed in a batch, continuing...",
+                        );
+                    }
                 }
+
                 batchSuccess = true;
             } catch (e) {
-                if (batchAttempts >= MAX_BATCH_ATTEMPTS) {
+                console.error(
+                    `      ❌ Attempt ${attempts} failed for batch: ${e.message}`,
+                );
+                if (attempts >= MAX_ATTEMPTS) {
+                    console.error(
+                        `      ⚠️ Batch 彻底失败，该段落将保留原文 (Skip).`,
+                    );
                     batch.forEach((n) =>
                         $(`[data-t-id="${n.id}"]`).removeAttr("data-t-id"),
                     );
                 } else {
-                    await new Promise((resolve) => setTimeout(resolve, 1000));
+                    // 等待一会儿重试
+                    await new Promise((r) => setTimeout(r, 1500));
                 }
             }
         }
@@ -372,10 +411,8 @@ const main = async () => {
         ),
     );
 
-    // =================== 修改后的 Step 3：基于路径强绑定的同步 ===================
-    console.log(
-        "\n🧐 Step 3: Synchronizing Headings (Strong Binding via Href/ID)...",
-    );
+    // =================== Step 3：同步 NCX (强绑定模式) ===================
+    console.log("\n🧐 Step 3: Synchronizing Headings (Strong Binding)...");
 
     const ncxEntry = zipEntries.find((e) => e.entryName.endsWith(".ncx"));
     let ncxContent = "";
@@ -383,24 +420,26 @@ const main = async () => {
 
     if (ncxEntry) {
         ncxContent = ncxEntry.getData().toString("utf8");
-        $ncx = cheerio.load(ncxContent, { xmlMode: true });
+        $ncx = cheerio.load(ncxContent, {
+            xmlMode: true,
+            decodeEntities: false,
+        });
     }
 
     const headingSelectors = "h1, h2, h3, h4, h5, h6";
     const uniqueHeadings = new Set();
-    const chapterFinalHeadings = new Map(); // 用于存储 ID -> 最终标题
 
-    // 1. 提取翻译后的第一个标题
-    for (const [id, data] of chapterMap) {
-        const $temp = cheerio.load(data.html);
-        const firstHeading = $temp(headingSelectors).first().text().trim();
-        if (firstHeading) {
-            uniqueHeadings.add(firstHeading);
-            chapterFinalHeadings.set(id, firstHeading);
-        }
+    for (const data of chapterMap.values()) {
+        const $temp = cheerio.load(data.html, {
+            xmlMode: true,
+            decodeEntities: false,
+        });
+        $temp(headingSelectors).each((_, el) => {
+            const txt = $temp(el).text().trim();
+            if (txt) uniqueHeadings.add(txt);
+        });
     }
 
-    // 2. 调用 AI 规范化标题格式（第1章等）
     let corrections = {};
     if (uniqueHeadings.size > 0) {
         const prompt = `
@@ -419,50 +458,36 @@ const main = async () => {
                 responseText.replace(/```json|```/g, "").trim(),
             );
         } catch (e) {
-            console.warn("   ⚠️ AI heading standardization failed.");
+            console.warn("   ⚠️ Heading AI standardization failed.");
         }
     }
 
-    // 3. 应用修正：同步 HTML 内容与 NCX 目录
     for (const [id, data] of chapterMap) {
-        const $html = cheerio.load(data.html);
-        let firstCorrectedTitle = null;
+        const $html = cheerio.load(data.html, {
+            xmlMode: true,
+            decodeEntities: false,
+        });
+        let firstTitle = null;
 
         $html(headingSelectors).each((i, el) => {
-            const originalText = $html(el).text().trim();
-            const correctedText = corrections[originalText] || originalText;
-
-            if (originalText !== correctedText) {
-                $html(el).text(correctedText);
-            }
-            if (i === 0) firstCorrectedTitle = correctedText;
+            const original = $html(el).text().trim();
+            const corrected = corrections[original] || original;
+            if (original !== corrected) $html(el).text(corrected);
+            if (i === 0) firstTitle = corrected;
         });
 
         data.html = $html.html();
 
-        // 【强绑定关键】：通过 chapter.id 直接定位 NCX 节点
-        if ($ncx && firstCorrectedTitle) {
-            // 策略 A：通过 ID 定位（最准）
-            let $navPoint = $ncx(`navPoint[id="${id}"]`);
-
-            // 策略 B：如果 ID 不匹配，通过 href 模糊定位
-            if ($navPoint.length === 0) {
-                const fileName = path.basename(data.href);
-                $navPoint = $ncx(`navPoint`).filter((_, el) => {
-                    const src = $ncx(el).find("content").attr("src");
-                    return src && src.includes(fileName);
-                });
-            }
-
-            if ($navPoint.length > 0) {
-                $navPoint
-                    .find("navLabel > text")
-                    .first()
-                    .text(firstCorrectedTitle);
-                console.log(
-                    `   ✅ Synced: [File: ${path.basename(data.href)}] -> "${firstCorrectedTitle}"`,
+        if ($ncx && firstTitle) {
+            let $nav = $ncx(`navPoint[id="${id}"]`);
+            if ($nav.length === 0) {
+                const fn = path.basename(data.href);
+                $nav = $ncx(`navPoint`).filter((_, el) =>
+                    $ncx(el).find("content").attr("src")?.includes(fn),
                 );
             }
+            if ($nav.length > 0)
+                $nav.find("navLabel > text").first().text(firstTitle);
         }
     }
 
@@ -473,9 +498,8 @@ const main = async () => {
     for (const [id, data] of chapterMap.entries()) {
         zip.updateFile(data.entryName, Buffer.from(data.html, "utf8"));
     }
-    if (ncxEntry) {
+    if (ncxEntry)
         zip.updateFile(ncxEntry.entryName, Buffer.from(ncxContent, "utf8"));
-    }
 
     zip.writeZip(outputPath);
     console.log(`🎉 Done! Output: ${path.basename(outputPath)}`);
