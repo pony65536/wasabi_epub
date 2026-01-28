@@ -1,0 +1,484 @@
+import "dotenv/config";
+import { EPub } from "epub2";
+import AdmZip from "adm-zip";
+import { GoogleGenerativeAI } from "@google/generative-ai";
+import OpenAI from "openai";
+import * as cheerio from "cheerio";
+import pLimit from "p-limit";
+import path from "path";
+import { fileURLToPath } from "url";
+import * as fs from "fs/promises";
+import { Mutex } from "async-mutex";
+
+// =================== 0. ESM 环境兼容设置 ===================
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+// =================== 1. 核心设置 ===================
+const INPUT_FILE_NAME =
+    "One from Many VISA and the Rise of Chaordic Organization (VISA InternationalHock, Dee) (Z-Library).epub";
+const CURRENT_PROVIDER = "mimo";
+
+const TEST_MODE_LIMIT = 1; // Set to null to process the entire book
+
+const CONFIG = {
+    targetLanguage: "Chinese (Simplified)",
+    gemini: {
+        apiKey: process.env.GEMINI_API_KEY,
+        modelName: "gemini-2.5-pro",
+        concurrency: 1,
+    },
+    qwen: {
+        apiKey: process.env.DASHSCOPE_API_KEY,
+        baseURL: "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        modelName: "qwen3-max",
+        concurrency: 5,
+    },
+    mimo: {
+        apiKey: process.env.MIMO_API_KEY,
+        baseURL: "https://api.xiaomimimo.com/v1",
+        modelName: "mimo-v2-flash",
+        concurrency: 5,
+    },
+};
+
+// =================== 2. 翻译风格与标题规范 ===================
+const HEADING_RULES = `
+HEADING FORMATTING RULES:
+1. **Chapter Titles**: "Chapter X" -> "第X章", X is Arabic numeral, like "Chapter 1" -> "第1章".
+2. **Consistency**: Table of Contents must match Main Body.
+`;
+
+const STYLE_GUIDE = `
+TRANSLATION STYLE GUIDE (Target: Chinese Simplified):
+1. **Rephrase**: Natural Chinese (Xin Da Ya / 信达雅).
+2. **Split Long Sentences**: Break down long English clauses.
+3. **Tone**: Professional, insightful.
+4. **Vocabulary**: Use appropriate idioms (Chengyu) where natural.
+5. **No Translationese**: Avoid passive voice (e.g., limit usage of "被").
+${HEADING_RULES}
+`;
+
+// =================== 3. 运行时一致性管理 ===================
+const RUNTIME_GLOSSARY = {};
+const glossaryMutex = new Mutex();
+
+const getGlossaryPrompt = () => {
+    const terms = Object.entries(RUNTIME_GLOSSARY);
+    if (terms.length === 0) return "";
+    const glossaryList = terms
+        .slice(-200)
+        .map(([en, zh]) => `   - "${en}" -> "${zh}"`)
+        .join("\n");
+    return `
+    IMPORTANT: CONSISTENCY GLOSSARY (Strictly Adhere):
+${glossaryList}
+    `;
+};
+
+// =================== 4. AI 初始化与调用 ===================
+const fileInfo = path.parse(INPUT_FILE_NAME);
+const activeModelName = CONFIG[CURRENT_PROVIDER].modelName.replace(
+    /[\/\\]/g,
+    "-",
+);
+const inputPath = path.resolve(__dirname, INPUT_FILE_NAME);
+const outputPath = path.resolve(
+    __dirname,
+    `${fileInfo.name}_${activeModelName}.epub`,
+);
+
+let geminiModel, qwenClient, mimoClient;
+
+const initClient = () => {
+    if (CURRENT_PROVIDER === "gemini") {
+        const genAI = new GoogleGenerativeAI(CONFIG.gemini.apiKey);
+        geminiModel = genAI.getGenerativeModel({
+            model: CONFIG.gemini.modelName,
+        });
+    } else {
+        const client = new OpenAI({
+            apiKey: CONFIG[CURRENT_PROVIDER].apiKey,
+            baseURL: CONFIG[CURRENT_PROVIDER].baseURL,
+        });
+        if (CURRENT_PROVIDER === "qwen") qwenClient = client;
+        else mimoClient = client;
+    }
+};
+
+const callAI = async (
+    userContent,
+    systemInstruction,
+    forceJsonMode = false,
+) => {
+    if (!userContent?.trim()) return "";
+    try {
+        if (CURRENT_PROVIDER === "gemini") {
+            const result = await geminiModel.generateContent(
+                `${systemInstruction}\n\nUser Input:\n${userContent}`,
+            );
+            return (await result.response).text().trim();
+        } else {
+            const client =
+                CURRENT_PROVIDER === "qwen" ? qwenClient : mimoClient;
+            const options = {
+                model: CONFIG[CURRENT_PROVIDER].modelName,
+                messages: [
+                    { role: "system", content: systemInstruction },
+                    { role: "user", content: userContent },
+                ],
+                ...(forceJsonMode && {
+                    response_format: { type: "json_object" },
+                }),
+            };
+            const completion = await client.chat.completions.create(options);
+            return completion.choices[0].message.content.trim();
+        }
+    } catch (e) {
+        throw e;
+    }
+};
+
+const extractHeading = (htmlContent) => {
+    const $ = cheerio.load(htmlContent);
+    let heading = $("h1, h2").first();
+    if (heading.length > 0) return heading.text().replace(/\s+/g, " ").trim();
+    const titleTag = $("title").text();
+    return titleTag ? titleTag.trim() : null;
+};
+
+// =================== 5. Agent 规划模块 ===================
+const planTranslationOrder = async (chapters) => {
+    console.log("🕵️ Agent is analyzing book structure...");
+    const simplifiedChapters = chapters.map((ch) => ({
+        id: ch.id,
+        title: ch.title,
+    }));
+
+    const agentPrompt = `
+    You are a "Translation Strategy Agent".
+    I have an EPUB book to translate.
+
+    GOAL: Reorder the processing list to follow this logic:
+    1. **MAIN CONTENT FIRST**: Chapters like "Chapter 1", "Chapter 2", "The Rise of VISA", etc.
+    2. **FRONT/BACK MATTER LAST**: "Preface", "Introduction", "Foreword", "Copyright", "Dedication".
+
+    REASON: Translating the main content first builds the context glossary, which improves the quality of the Preface/Introduction translation later.
+
+    INPUT: A JSON list of chapters.
+    OUTPUT: A JSON object containing a single array "order" with the "id"s sorted in the best processing order.
+
+    Example Output Format:
+    {
+        "order": ["item3", "item4", "item5", "item1", "item2"]
+    }
+    `;
+
+    try {
+        const responseText = await callAI(
+            JSON.stringify(simplifiedChapters),
+            agentPrompt,
+            true,
+        );
+        const result = JSON.parse(
+            responseText.replace(/```json|```/g, "").trim(),
+        );
+        const chapterMap = new Map(chapters.map((c) => [c.id, c]));
+        const ordered = result.order
+            .filter((id) => chapterMap.has(id))
+            .map((id) => {
+                const ch = chapterMap.get(id);
+                chapterMap.delete(id);
+                return ch;
+            });
+        return [...ordered, ...chapterMap.values()];
+    } catch (e) {
+        console.error("Agent failed, using default order.");
+        return chapters;
+    }
+};
+
+const translateHtmlContent = async (htmlContent, chapterTitle) => {
+    const $ = cheerio.load(htmlContent);
+
+    const nodesToTranslate = [];
+    $("p, li, h1, h2, h3, h4, h5, h6, caption, title").each((i, el) => {
+        const $el = $(el);
+        const originalHtml = $el.html().trim();
+        if (originalHtml && originalHtml.length > 0) {
+            const nodeId = `node_${i}`;
+            $el.attr("data-t-id", nodeId);
+            nodesToTranslate.push({ id: nodeId, content: originalHtml });
+        }
+    });
+
+    if (nodesToTranslate.length === 0)
+        return { html: htmlContent, newTerms: {} };
+
+    const BATCH_SIZE_LIMIT = 4000;
+    const batches = [];
+    let currentBatch = [];
+    let currentLength = 0;
+
+    for (const node of nodesToTranslate) {
+        if (
+            currentLength + node.content.length > BATCH_SIZE_LIMIT &&
+            currentBatch.length > 0
+        ) {
+            batches.push(currentBatch);
+            currentBatch = [];
+            currentLength = 0;
+        }
+        currentBatch.push(node);
+        currentLength += node.content.length;
+    }
+    if (currentBatch.length > 0) batches.push(currentBatch);
+
+    let allNewTerms = {};
+
+    for (const batch of batches) {
+        let batchSuccess = false;
+        let batchAttempts = 0;
+        const MAX_BATCH_ATTEMPTS = 3;
+
+        while (!batchSuccess && batchAttempts < MAX_BATCH_ATTEMPTS) {
+            try {
+                batchAttempts++;
+                const currentGlossaryPrompt = await glossaryMutex.runExclusive(
+                    () => getGlossaryPrompt(),
+                );
+
+                const batchInput = batch
+                    .map((n) => `<node id="${n.id}">${n.content}</node>`)
+                    .join("\n");
+
+                const prompt = `
+TASK: Translate the content of each <node> into ${CONFIG.targetLanguage}.
+CONTEXT: Book Chapter "${chapterTitle}".
+
+${STYLE_GUIDE}
+${currentGlossaryPrompt}
+
+🛑 RULES:
+1. Return each node as: <node id="node_x">translated text</node>
+2. Keep inline tags (<a>, <strong>, etc.) intact.
+3. If new terms are found, return them in: <glossary>{"English": "TargetLanguage"}</glossary>
+                `;
+
+                const rawResponse = await callAI(batchInput, prompt, false);
+
+                for (const node of batch) {
+                    const nodeRegex = new RegExp(
+                        `<node id="${node.id}">([\\s\\S]*?)<\/node>`,
+                        "i",
+                    );
+                    const match = rawResponse.match(nodeRegex);
+
+                    if (match && match[1]) {
+                        $(`[data-t-id="${node.id}"]`)
+                            .html(match[1].trim())
+                            .removeAttr("data-t-id");
+                    } else {
+                        $(`[data-t-id="${node.id}"]`).removeAttr("data-t-id");
+                    }
+                }
+
+                const glossaryMatch = rawResponse.match(
+                    /<glossary>([\s\S]*?)<\/glossary>/i,
+                );
+                if (glossaryMatch) {
+                    try {
+                        const jsonStr = glossaryMatch[1]
+                            .replace(/```json|```/g, "")
+                            .trim();
+                        const newTerms = JSON.parse(jsonStr);
+
+                        if (Object.keys(newTerms).length > 0) {
+                            Object.assign(allNewTerms, newTerms);
+                            await glossaryMutex.runExclusive(() => {
+                                Object.assign(RUNTIME_GLOSSARY, newTerms);
+                            });
+                        }
+                    } catch (e) {}
+                }
+                batchSuccess = true;
+            } catch (e) {
+                if (batchAttempts >= MAX_BATCH_ATTEMPTS) {
+                    batch.forEach((n) =>
+                        $(`[data-t-id="${n.id}"]`).removeAttr("data-t-id"),
+                    );
+                } else {
+                    await new Promise((resolve) => setTimeout(resolve, 1000));
+                }
+            }
+        }
+    }
+
+    return {
+        html: $.html(),
+        newTerms: allNewTerms,
+    };
+};
+
+// =================== 7. 主流程 ===================
+const main = async () => {
+    initClient();
+    console.log(`\n========================================`);
+    console.log(`📖 Input: ${path.basename(inputPath)}`);
+    console.log(`========================================\n`);
+
+    const zip = new AdmZip(inputPath);
+    const epub = await EPub.createAsync(inputPath);
+    const zipEntries = zip.getEntries();
+
+    console.log("📖 Step 1: Analyzing Book Structure...");
+    const chapterMap = new Map();
+    const rawChapters = epub.flow.map((chapter) => {
+        const zipEntry = zipEntries.find((e) =>
+            decodeURIComponent(e.entryName).endsWith(
+                decodeURIComponent(chapter.href),
+            ),
+        );
+        const html = zipEntry ? zipEntry.getData().toString("utf8") : "";
+        const data = {
+            ...chapter,
+            html,
+            entryName: zipEntry?.entryName,
+            title: chapter.title || extractHeading(html) || "Untitled",
+        };
+        if (data.entryName) chapterMap.set(data.id, data);
+        return data;
+    });
+
+    const sortedChapters = await planTranslationOrder(rawChapters);
+    console.log("\n✍️ Step 2: Translating Book Content...");
+
+    const limit = pLimit(CONFIG[CURRENT_PROVIDER].concurrency);
+    const chaptersToProcess = sortedChapters.slice(
+        0,
+        TEST_MODE_LIMIT || sortedChapters.length,
+    );
+
+    await Promise.all(
+        chaptersToProcess.map((ch, idx) =>
+            limit(async () => {
+                console.log(
+                    `🚀 [${idx + 1}/${chaptersToProcess.length}] Processing: "${ch.title}"`,
+                );
+                const result = await translateHtmlContent(ch.html, ch.title);
+                if (chapterMap.has(ch.id))
+                    chapterMap.get(ch.id).html = result.html;
+            }),
+        ),
+    );
+
+    // =================== 修改后的 Step 3：基于路径强绑定的同步 ===================
+    console.log(
+        "\n🧐 Step 3: Synchronizing Headings (Strong Binding via Href/ID)...",
+    );
+
+    const ncxEntry = zipEntries.find((e) => e.entryName.endsWith(".ncx"));
+    let ncxContent = "";
+    let $ncx = null;
+
+    if (ncxEntry) {
+        ncxContent = ncxEntry.getData().toString("utf8");
+        $ncx = cheerio.load(ncxContent, { xmlMode: true });
+    }
+
+    const headingSelectors = "h1, h2, h3, h4, h5, h6";
+    const uniqueHeadings = new Set();
+    const chapterFinalHeadings = new Map(); // 用于存储 ID -> 最终标题
+
+    // 1. 提取翻译后的第一个标题
+    for (const [id, data] of chapterMap) {
+        const $temp = cheerio.load(data.html);
+        const firstHeading = $temp(headingSelectors).first().text().trim();
+        if (firstHeading) {
+            uniqueHeadings.add(firstHeading);
+            chapterFinalHeadings.set(id, firstHeading);
+        }
+    }
+
+    // 2. 调用 AI 规范化标题格式（第1章等）
+    let corrections = {};
+    if (uniqueHeadings.size > 0) {
+        const prompt = `
+        You are a professional copy editor. Standardize chapter headings.
+        RULES: "Chapter X" -> "第X章" (Arabic numerals).
+            Example Input: ["第一章 开始", "第2章 中间", "Conclusion", "第3章<br/><br/>结束"]
+    Example Output: { "第一章 开始": "第1章 开始", "第2章 中间": "第2章 中间", "Conclusion": "Conclusion", "第3章<br/><br/>结束": "第3章 结束"}
+        `;
+        try {
+            const responseText = await callAI(
+                JSON.stringify(Array.from(uniqueHeadings)),
+                prompt,
+                true,
+            );
+            corrections = JSON.parse(
+                responseText.replace(/```json|```/g, "").trim(),
+            );
+        } catch (e) {
+            console.warn("   ⚠️ AI heading standardization failed.");
+        }
+    }
+
+    // 3. 应用修正：同步 HTML 内容与 NCX 目录
+    for (const [id, data] of chapterMap) {
+        const $html = cheerio.load(data.html);
+        let firstCorrectedTitle = null;
+
+        $html(headingSelectors).each((i, el) => {
+            const originalText = $html(el).text().trim();
+            const correctedText = corrections[originalText] || originalText;
+
+            if (originalText !== correctedText) {
+                $html(el).text(correctedText);
+            }
+            if (i === 0) firstCorrectedTitle = correctedText;
+        });
+
+        data.html = $html.html();
+
+        // 【强绑定关键】：通过 chapter.id 直接定位 NCX 节点
+        if ($ncx && firstCorrectedTitle) {
+            // 策略 A：通过 ID 定位（最准）
+            let $navPoint = $ncx(`navPoint[id="${id}"]`);
+
+            // 策略 B：如果 ID 不匹配，通过 href 模糊定位
+            if ($navPoint.length === 0) {
+                const fileName = path.basename(data.href);
+                $navPoint = $ncx(`navPoint`).filter((_, el) => {
+                    const src = $ncx(el).find("content").attr("src");
+                    return src && src.includes(fileName);
+                });
+            }
+
+            if ($navPoint.length > 0) {
+                $navPoint
+                    .find("navLabel > text")
+                    .first()
+                    .text(firstCorrectedTitle);
+                console.log(
+                    `   ✅ Synced: [File: ${path.basename(data.href)}] -> "${firstCorrectedTitle}"`,
+                );
+            }
+        }
+    }
+
+    if ($ncx) ncxContent = $ncx.xml();
+
+    // =================== 写入逻辑 ===================
+    console.log(`\n💾 Step 4: Finalizing and Saving...`);
+    for (const [id, data] of chapterMap.entries()) {
+        zip.updateFile(data.entryName, Buffer.from(data.html, "utf8"));
+    }
+    if (ncxEntry) {
+        zip.updateFile(ncxEntry.entryName, Buffer.from(ncxContent, "utf8"));
+    }
+
+    zip.writeZip(outputPath);
+    console.log(`🎉 Done! Output: ${path.basename(outputPath)}`);
+};
+
+main().catch(console.error);

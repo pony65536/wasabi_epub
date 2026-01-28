@@ -1,0 +1,18 @@
+{
+    "main": "bot.js",
+    "type": "module",
+    "dependencies": {
+        "@google/generative-ai": "^0.24.1",
+        "async-mutex": "^0.5.0",
+        "cheerio": "^1.1.2",
+        "dotenv": "^17.2.3",
+        "epub2": "^3.0.2",
+        "grammy": "^1.38.4",
+        "nodepub": "^3.2.1",
+        "openai": "^6.14.0",
+        "p-limit": "^7.2.0"
+    },
+    "devDependencies": {
+        "typescript": "^5.9.3"
+    }
+}
