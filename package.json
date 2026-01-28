@@ -4,6 +4,7 @@
     "dependencies": {
         "@google/generative-ai": "^0.24.1",
         "async-mutex": "^0.5.0",
+        "better-queue": "^3.8.12",
         "cheerio": "^1.1.2",
         "dotenv": "^17.2.3",
         "epub2": "^3.0.2",

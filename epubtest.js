@@ -4,11 +4,10 @@ import AdmZip from "adm-zip";
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import OpenAI from "openai";
 import * as cheerio from "cheerio";
-import pLimit from "p-limit";
 import path from "path";
 import { fileURLToPath } from "url";
-import * as fs from "fs/promises";
 import { Mutex } from "async-mutex";
+import Queue from "better-queue";
 
 // =================== 0. ESM 环境兼容设置 ===================
 const __filename = fileURLToPath(import.meta.url);
@@ -42,12 +41,7 @@ const CONFIG = {
     },
 };
 
-// =================== 2. 翻译风格与标题规范 ===================
-const HEADING_RULES = `
-HEADING FORMATTING RULES:
-1. **Chapter Titles**: "Chapter X" -> "第X章", X is Arabic numeral, like "Chapter 1" -> "第1章".
-2. **Consistency**: Table of Contents must match Main Body.
-`;
+// =================== 2. 翻译风格 ===================
 
 const STYLE_GUIDE = `
 TRANSLATION STYLE GUIDE (Target: Chinese Simplified):
@@ -56,7 +50,8 @@ TRANSLATION STYLE GUIDE (Target: Chinese Simplified):
 3. **Tone**: Professional, insightful.
 4. **Vocabulary**: Use appropriate idioms (Chengyu) where natural.
 5. **No Translationese**: Avoid passive voice (e.g., limit usage of "被").
-${HEADING_RULES}
+HEADING FORMATTING RULES:
+1. **Consistency**: Table of Contents must match Main Body.
 `;
 
 // =================== 3. 运行时一致性管理 ===================
@@ -68,7 +63,7 @@ const getGlossaryPrompt = () => {
     if (terms.length === 0) return "";
     const glossaryList = terms
         .slice(-200)
-        .map(([en, zh]) => `   - "${en}" -> "${zh}"`)
+        .map(([en, zh]) => `    - "${en}" -> "${zh}"`)
         .join("\n");
     return `
     IMPORTANT: CONSISTENCY GLOSSARY (Strictly Adhere):
@@ -201,7 +196,134 @@ const planTranslationOrder = async (chapters) => {
     }
 };
 
-// =================== 6. 核心翻译逻辑 (增强错误处理) ===================
+// =================== 6. 任务队列初始化 (带内容查看) ===================
+
+const batchQueue = new Queue(
+    async (task, cb) => {
+        const { batch, chapterTitle, $parent } = task;
+        const MAX_ATTEMPTS = 3;
+        let attempts = 0;
+        let success = false;
+
+        while (!success && attempts < MAX_ATTEMPTS) {
+            try {
+                attempts++;
+                const currentGlossaryPrompt = await glossaryMutex.runExclusive(
+                    () => getGlossaryPrompt(),
+                );
+                const batchInput = batch
+                    .map((n) => `<node id="${n.id}">${n.content}</node>`)
+                    .join("\n");
+
+                const prompt = `
+TASK: Translate the content of each <node> into ${CONFIG.targetLanguage}.
+CONTEXT: Book Chapter "${chapterTitle}".
+
+${STYLE_GUIDE}
+${currentGlossaryPrompt}
+
+🛑 RULES:
+1. Return each node as: <node id="node_x">translated text</node>
+2. Keep inline tags (<a>, <strong>, etc.) intact.
+3. If new terms are found, return them in: <glossary>{"English": "TargetLanguage"}</glossary>
+            `;
+
+                const rawResponse = await callAI(batchInput, prompt, false);
+                const matchedResults = new Map();
+                let nodesFoundCount = 0;
+
+                for (const node of batch) {
+                    const nodeRegex = new RegExp(
+                        `<node id="${node.id}">([\\s\\S]*?)<\/node>`,
+                        "i",
+                    );
+                    const match = rawResponse.match(nodeRegex);
+                    if (match && match[1]) {
+                        matchedResults.set(node.id, match[1].trim());
+                        nodesFoundCount++;
+                    }
+                }
+
+                if (nodesFoundCount < batch.length * 0.8) {
+                    throw new Error(
+                        `AI response corrupted. Found ${nodesFoundCount}/${batch.length} nodes.`,
+                    );
+                }
+
+                for (const node of batch) {
+                    const translatedText = matchedResults.get(node.id);
+                    if (translatedText) {
+                        $parent(`[data-t-id="${node.id}"]`)
+                            .html(translatedText)
+                            .removeAttr("data-t-id");
+                    } else {
+                        $parent(`[data-t-id="${node.id}"]`).removeAttr(
+                            "data-t-id",
+                        );
+                    }
+                }
+
+                const glossaryMatch = rawResponse.match(
+                    /<glossary>([\s\S]*?)<\/glossary>/i,
+                );
+                if (glossaryMatch) {
+                    try {
+                        const jsonStr = glossaryMatch[1]
+                            .replace(/```json|```/g, "")
+                            .trim();
+                        const newTerms = JSON.parse(jsonStr);
+                        if (Object.keys(newTerms).length > 0) {
+                            await glossaryMutex.runExclusive(() => {
+                                Object.assign(RUNTIME_GLOSSARY, newTerms);
+                            });
+                        }
+                    } catch (e) {
+                        // Ignore glossary parse errors
+                    }
+                }
+
+                success = true;
+                cb(null);
+            } catch (e) {
+                if (attempts >= MAX_ATTEMPTS) {
+                    console.error(
+                        `\n🚨 BATCH FAILED AFTER ${MAX_ATTEMPTS} ATTEMPTS`,
+                    );
+                    console.error(`📍 Chapter: "${chapterTitle}"`);
+                    console.error(`❌ Error: ${e.message}`);
+
+                    // 打印出失败 Batch 的原文预览
+                    const preview = batch
+                        .map((n) => n.content)
+                        .join(" ")
+                        .substring(0, 300);
+                    console.log(
+                        `📝 SKIPPED CONTENT PREVIEW:\n"${preview}..."\n`,
+                    );
+
+                    batch.forEach((n) =>
+                        $parent(`[data-t-id="${n.id}"]`).removeAttr(
+                            "data-t-id",
+                        ),
+                    );
+                    cb(e);
+                } else {
+                    console.warn(
+                        `      ⚠️ Attempt ${attempts} failed for batch in "${chapterTitle}", retrying...`,
+                    );
+                    await new Promise((r) => setTimeout(r, 2000));
+                }
+            }
+        }
+    },
+    {
+        concurrent: CONFIG[CURRENT_PROVIDER].concurrency,
+        maxRetries: 0,
+    },
+);
+
+// =================== 7. 翻译 HTML 内容 ===================
+
 const translateHtmlContent = async (htmlContent, chapterTitle) => {
     const $ = cheerio.load(htmlContent, {
         xmlMode: true,
@@ -219,8 +341,7 @@ const translateHtmlContent = async (htmlContent, chapterTitle) => {
         }
     });
 
-    if (nodesToTranslate.length === 0)
-        return { html: htmlContent, newTerms: {} };
+    if (nodesToTranslate.length === 0) return $.html();
 
     const BATCH_SIZE_LIMIT = 4000;
     const batches = [];
@@ -241,135 +362,22 @@ const translateHtmlContent = async (htmlContent, chapterTitle) => {
     }
     if (currentBatch.length > 0) batches.push(currentBatch);
 
-    let allNewTerms = {};
+    const batchPromises = batches.map((batch) => {
+        return new Promise((resolve) => {
+            batchQueue
+                .push({ batch, chapterTitle, $parent: $ })
+                .on("finish", () => resolve())
+                .on("failed", () => resolve());
+        });
+    });
 
-    for (const batch of batches) {
-        let batchSuccess = false;
-        let attempts = 0;
-        const MAX_ATTEMPTS = 3;
-
-        while (!batchSuccess && attempts < MAX_ATTEMPTS) {
-            try {
-                attempts++;
-                const currentGlossaryPrompt = await glossaryMutex.runExclusive(
-                    () => getGlossaryPrompt(),
-                );
-
-                const batchInput = batch
-                    .map((n) => `<node id="${n.id}">${n.content}</node>`)
-                    .join("\n");
-
-                const prompt = `
-TASK: Translate the content of each <node> into ${CONFIG.targetLanguage}.
-CONTEXT: Book Chapter "${chapterTitle}".
-
-${STYLE_GUIDE}
-${currentGlossaryPrompt}
-
-🛑 RULES:
-1. Return each node as: <node id="node_x">translated text</node>
-2. Keep inline tags (<a>, <strong>, etc.) intact.
-3. If new terms are found, return them in: <glossary>{"English": "TargetLanguage"}</glossary>
-                `;
-
-                const rawResponse = await callAI(batchInput, prompt, false);
-
-                // 核心重构：不仅检查 API 报错，还要校验返回的格式是否完整
-                const matchedResults = new Map();
-                let nodesFoundCount = 0;
-
-                for (const node of batch) {
-                    const nodeRegex = new RegExp(
-                        `<node id="${node.id}">([\\s\\S]*?)<\/node>`,
-                        "i",
-                    );
-                    const match = rawResponse.match(nodeRegex);
-                    if (match && match[1]) {
-                        matchedResults.set(node.id, match[1].trim());
-                        nodesFoundCount++;
-                    }
-                }
-
-                // 校验：如果返回的节点数量严重不足，视为翻译格式损坏，触发重试
-                if (nodesFoundCount < batch.length * 0.8) {
-                    throw new Error(
-                        `AI response format corrupted. Found ${nodesFoundCount}/${batch.length} nodes.`,
-                    );
-                }
-
-                // 成功解析后的应用
-                for (const node of batch) {
-                    const translatedText = matchedResults.get(node.id);
-                    if (translatedText) {
-                        $(`[data-t-id="${node.id}"]`)
-                            .html(translatedText)
-                            .removeAttr("data-t-id");
-                    } else {
-                        // 没翻译成功的个别节点，保留原文，清除 ID 属性
-                        $(`[data-t-id="${node.id}"]`).removeAttr("data-t-id");
-                    }
-                }
-
-                // 词汇表解析
-                const glossaryMatch = rawResponse.match(
-                    /<glossary>([\s\S]*?)<\/glossary>/i,
-                );
-                if (glossaryMatch) {
-                    try {
-                        const jsonStr = glossaryMatch[1]
-                            .replace(/```json|```/g, "")
-                            .trim();
-                        const newTerms = JSON.parse(jsonStr);
-                        if (Object.keys(newTerms).length > 0) {
-                            Object.assign(allNewTerms, newTerms);
-                            await glossaryMutex.runExclusive(() => {
-                                Object.assign(RUNTIME_GLOSSARY, newTerms);
-                            });
-                        }
-                    } catch (e) {
-                        console.warn(
-                            "      ⚠️ Glossary parse failed in a batch, continuing...",
-                        );
-                    }
-                }
-
-                batchSuccess = true;
-            } catch (e) {
-                console.error(
-                    `      ❌ Attempt ${attempts} failed for batch: ${e.message}`,
-                );
-                if (attempts >= MAX_ATTEMPTS) {
-                    console.error(
-                        `      ⚠️ Batch 彻底失败，该段落将保留原文 (Skip).`,
-                    );
-                    batch.forEach((n) =>
-                        $(`[data-t-id="${n.id}"]`).removeAttr("data-t-id"),
-                    );
-                } else {
-                    // 等待一会儿重试
-                    await new Promise((r) => setTimeout(r, 1500));
-                }
-            }
-        }
-    }
-
-    return {
-        html: $.html(),
-        newTerms: allNewTerms,
-    };
+    await Promise.all(batchPromises);
+    return $.html();
 };
 
-// =================== 7. 主流程 ===================
-const main = async () => {
-    initClient();
-    console.log(`\n========================================`);
-    console.log(`📖 Input: ${path.basename(inputPath)}`);
-    console.log(`========================================\n`);
+// =================== 8. 步骤封装函数 ===================
 
-    const zip = new AdmZip(inputPath);
-    const epub = await EPub.createAsync(inputPath);
-    const zipEntries = zip.getEntries();
-
+async function analyzeStructure(epub, zipEntries) {
     console.log("📖 Step 1: Analyzing Book Structure...");
     const chapterMap = new Map();
     const rawChapters = epub.flow.map((chapter) => {
@@ -390,28 +398,29 @@ const main = async () => {
     });
 
     const sortedChapters = await planTranslationOrder(rawChapters);
-    console.log("\n✍️ Step 2: Translating Book Content...");
+    return { chapterMap, sortedChapters };
+}
 
-    const limit = pLimit(CONFIG[CURRENT_PROVIDER].concurrency);
+async function performTranslation(sortedChapters, chapterMap) {
+    console.log("\n✍️ Step 2: Translating Book Content (Batch Queue Mode)...");
     const chaptersToProcess = sortedChapters.slice(
         0,
         TEST_MODE_LIMIT || sortedChapters.length,
     );
 
-    await Promise.all(
-        chaptersToProcess.map((ch, idx) =>
-            limit(async () => {
-                console.log(
-                    `🚀 [${idx + 1}/${chaptersToProcess.length}] Processing: "${ch.title}"`,
-                );
-                const result = await translateHtmlContent(ch.html, ch.title);
-                if (chapterMap.has(ch.id))
-                    chapterMap.get(ch.id).html = result.html;
-            }),
-        ),
-    );
+    for (let i = 0; i < chaptersToProcess.length; i++) {
+        const ch = chaptersToProcess[i];
+        console.log(
+            `🚀 [${i + 1}/${chaptersToProcess.length}] Processing Chapter: "${ch.title}"`,
+        );
+        const translatedHtml = await translateHtmlContent(ch.html, ch.title);
+        if (chapterMap.has(ch.id)) {
+            chapterMap.get(ch.id).html = translatedHtml;
+        }
+    }
+}
 
-    // =================== Step 3：同步 NCX (强绑定模式) ===================
+async function synchronizeHeadings(chapterMap, zipEntries) {
     console.log("\n🧐 Step 3: Synchronizing Headings (Strong Binding)...");
 
     const ncxEntry = zipEntries.find((e) => e.entryName.endsWith(".ncx"));
@@ -458,7 +467,7 @@ const main = async () => {
                 responseText.replace(/```json|```/g, "").trim(),
             );
         } catch (e) {
-            console.warn("   ⚠️ Heading AI standardization failed.");
+            console.warn("    ⚠️ Heading AI standardization failed.");
         }
     }
 
@@ -491,9 +500,13 @@ const main = async () => {
         }
     }
 
-    if ($ncx) ncxContent = $ncx.xml();
+    return {
+        ncxEntry,
+        ncxContent: $ncx ? $ncx.xml() : ncxContent,
+    };
+}
 
-    // =================== 写入逻辑 ===================
+async function saveEpub(zip, chapterMap, ncxEntry, ncxContent) {
     console.log(`\n💾 Step 4: Finalizing and Saving...`);
     for (const [id, data] of chapterMap.entries()) {
         zip.updateFile(data.entryName, Buffer.from(data.html, "utf8"));
@@ -503,6 +516,29 @@ const main = async () => {
 
     zip.writeZip(outputPath);
     console.log(`🎉 Done! Output: ${path.basename(outputPath)}`);
+}
+
+// =================== 9. 主流程 ===================
+const main = async () => {
+    initClient();
+    console.log(`\n========================================`);
+    console.log(`📖 Input: ${path.basename(inputPath)}`);
+    console.log(`========================================\n`);
+
+    const zip = new AdmZip(inputPath);
+    const epub = await EPub.createAsync(inputPath);
+    const zipEntries = zip.getEntries();
+
+    const { chapterMap, sortedChapters } = await analyzeStructure(
+        epub,
+        zipEntries,
+    );
+    await performTranslation(sortedChapters, chapterMap);
+    const { ncxEntry, ncxContent } = await synchronizeHeadings(
+        chapterMap,
+        zipEntries,
+    );
+    await saveEpub(zip, chapterMap, ncxEntry, ncxContent);
 };
 
 main().catch(console.error);
