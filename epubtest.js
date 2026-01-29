@@ -18,7 +18,7 @@ const INPUT_FILE_NAME =
     "One from Many VISA and the Rise of Chaordic Organization (VISA InternationalHock, Dee) (Z-Library).epub";
 const CURRENT_PROVIDER = "mimo";
 
-const TEST_MODE_LIMIT = 1; // Set to null to process the entire book
+const TEST_MODE_LIMIT = 5; // Set to null to process the entire book
 
 const CONFIG = {
     targetLanguage: "Chinese (Simplified)",
@@ -154,23 +154,36 @@ const planTranslationOrder = async (chapters) => {
     }));
 
     const agentPrompt = `
-    You are a "Translation Strategy Agent".
-    I have an EPUB book to translate.
+You are a "Translation Strategy Agent".
+I have an EPUB book to translate.
 
-    GOAL: Reorder the processing list to follow this logic:
-    1. **MAIN CONTENT FIRST**: Chapters like "Chapter 1", "Chapter 2", "The Rise of VISA", etc.
-    2. **FRONT/BACK MATTER LAST**: "Preface", "Introduction", "Foreword", "Copyright", "Dedication".
+GOAL: Filter and reorder the processing list based on these strict rules:
 
-    REASON: Translating the main content first builds the context glossary, which improves the quality of the Preface/Introduction translation later.
+1. **IDENTIFY TOC (Action: Flag)**:
+- Find the chapter that serves as the "Table of Contents" or "Contents" page. 
+- If contents chapter exists, in the output JSON, set "tocId" to its ID, otherwise set "tocId" to null.
 
-    INPUT: A JSON list of chapters.
-    OUTPUT: A JSON object containing a single array "order" with the "id"s sorted in the best processing order.
+2. **FILTER & REMOVE (Strict Exclusion)**: 
+- From the final "order" list, **COMPLETELY REMOVE** any items identified as: "Table of Contents", "Contents", "Index", "Search Terms", or "Bibliography".
+- **Crucial Rule**: Even if you identify a chapter as the TOC for the "tocId" field, you must **NOT** include its ID in the "order" array. The "order" list should contain only translatable content.
 
-    Example Output Format:
-    {
-        "order": ["item3", "item4", "item5", "item1", "item2"]
-    }
-    `;
+3. **MAIN CONTENT FIRST (Priority 1)**: 
+- Core chapters (e.g., "Chapter 1", "The Rise of VISA", "Part I").
+- Translating these first builds the context glossary.
+
+4. **FRONT/BACK MATTER LAST (Priority 2)**: 
+- "Preface", "Introduction", "Foreword", "Copyright", "Dedication", "About the Author", "Acknowledgments".
+
+REASON: Main content provides the necessary context to translate the introductory and administrative sections accurately later.
+
+INPUT: A JSON list of chapters.
+OUTPUT: A JSON object containing a single array "order" with the "id"s sorted in the best processing order, excluding the forbidden categories.
+
+OUTPUT: A JSON object:
+{
+    "tocId": "id_of_toc_chapter_or_null",
+    "order": ["chapter_01", "chapter_02", ...]
+}`;
 
     try {
         const responseText = await callAI(
@@ -181,22 +194,28 @@ const planTranslationOrder = async (chapters) => {
         const result = JSON.parse(
             responseText.replace(/```json|```/g, "").trim(),
         );
+
         const chapterMap = new Map(chapters.map((c) => [c.id, c]));
         const ordered = result.order
             .filter((id) => chapterMap.has(id))
             .map((id) => {
                 const ch = chapterMap.get(id);
+                if (id === result.tocId) ch.isTOC = true;
                 chapterMap.delete(id);
                 return ch;
             });
-        return [...ordered, ...chapterMap.values()];
+
+        return {
+            sorted: [...ordered, ...chapterMap.values()],
+            tocId: result.tocId,
+        };
     } catch (e) {
         console.error("Agent failed, using default order.");
-        return chapters;
+        return { sorted: chapters, tocId: null };
     }
 };
 
-// =================== 6. 任务队列初始化 (带内容查看) ===================
+// =================== 6. 任务队列初始化 ===================
 
 const batchQueue = new Queue(
     async (task, cb) => {
@@ -256,10 +275,6 @@ ${currentGlossaryPrompt}
                         $parent(`[data-t-id="${node.id}"]`)
                             .html(translatedText)
                             .removeAttr("data-t-id");
-                    } else {
-                        $parent(`[data-t-id="${node.id}"]`).removeAttr(
-                            "data-t-id",
-                        );
                     }
                 }
 
@@ -277,40 +292,15 @@ ${currentGlossaryPrompt}
                                 Object.assign(RUNTIME_GLOSSARY, newTerms);
                             });
                         }
-                    } catch (e) {
-                        // Ignore glossary parse errors
-                    }
+                    } catch (e) {}
                 }
 
                 success = true;
                 cb(null);
             } catch (e) {
                 if (attempts >= MAX_ATTEMPTS) {
-                    console.error(
-                        `\n🚨 BATCH FAILED AFTER ${MAX_ATTEMPTS} ATTEMPTS`,
-                    );
-                    console.error(`📍 Chapter: "${chapterTitle}"`);
-                    console.error(`❌ Error: ${e.message}`);
-
-                    // 打印出失败 Batch 的原文预览
-                    const preview = batch
-                        .map((n) => n.content)
-                        .join(" ")
-                        .substring(0, 300);
-                    console.log(
-                        `📝 SKIPPED CONTENT PREVIEW:\n"${preview}..."\n`,
-                    );
-
-                    batch.forEach((n) =>
-                        $parent(`[data-t-id="${n.id}"]`).removeAttr(
-                            "data-t-id",
-                        ),
-                    );
                     cb(e);
                 } else {
-                    console.warn(
-                        `      ⚠️ Attempt ${attempts} failed for batch in "${chapterTitle}", retrying...`,
-                    );
                     await new Promise((r) => setTimeout(r, 2000));
                 }
             }
@@ -343,35 +333,53 @@ const translateHtmlContent = async (htmlContent, chapterTitle) => {
 
     if (nodesToTranslate.length === 0) return $.html();
 
-    const BATCH_SIZE_LIMIT = 4000;
-    const batches = [];
-    let currentBatch = [];
-    let currentLength = 0;
+    const BATCH_SIZE_LIMIT = 5000;
 
-    for (const node of nodesToTranslate) {
-        if (
-            currentLength + node.content.length > BATCH_SIZE_LIMIT &&
-            currentBatch.length > 0
-        ) {
-            batches.push(currentBatch);
-            currentBatch = [];
-            currentLength = 0;
+    const processInBatches = async (nodeList) => {
+        const batches = [];
+        let currentBatch = [];
+        let currentLength = 0;
+
+        for (const node of nodeList) {
+            if (
+                currentLength + node.content.length > BATCH_SIZE_LIMIT &&
+                currentBatch.length > 0
+            ) {
+                batches.push(currentBatch);
+                currentBatch = [];
+                currentLength = 0;
+            }
+            currentBatch.push(node);
+            currentLength += node.content.length;
         }
-        currentBatch.push(node);
-        currentLength += node.content.length;
-    }
-    if (currentBatch.length > 0) batches.push(currentBatch);
+        if (currentBatch.length > 0) batches.push(currentBatch);
 
-    const batchPromises = batches.map((batch) => {
-        return new Promise((resolve) => {
-            batchQueue
-                .push({ batch, chapterTitle, $parent: $ })
-                .on("finish", () => resolve())
-                .on("failed", () => resolve());
+        const promises = batches.map((batch) => {
+            return new Promise((resolve) => {
+                batchQueue
+                    .push({ batch, chapterTitle, $parent: $ })
+                    .on("finish", () => resolve())
+                    .on("failed", () => resolve());
+            });
+        });
+        await Promise.all(promises);
+    };
+
+    await processInBatches(nodesToTranslate);
+
+    const failedNodes = [];
+    $("[data-t-id]").each((_, el) => {
+        failedNodes.push({
+            id: $(el).attr("data-t-id"),
+            content: $(el).html(),
         });
     });
 
-    await Promise.all(batchPromises);
+    if (failedNodes.length > 0) {
+        await processInBatches(failedNodes);
+    }
+
+    $("[data-t-id]").removeAttr("data-t-id");
     return $.html();
 };
 
@@ -397,12 +405,12 @@ async function analyzeStructure(epub, zipEntries) {
         return data;
     });
 
-    const sortedChapters = await planTranslationOrder(rawChapters);
-    return { chapterMap, sortedChapters };
+    const { sorted, tocId } = await planTranslationOrder(rawChapters);
+    return { chapterMap, sortedChapters: sorted, tocId };
 }
 
 async function performTranslation(sortedChapters, chapterMap) {
-    console.log("\n✍️ Step 2: Translating Book Content (Batch Queue Mode)...");
+    console.log("\n✍️ Step 2: Translating Book Content...");
     const chaptersToProcess = sortedChapters.slice(
         0,
         TEST_MODE_LIMIT || sortedChapters.length,
@@ -410,6 +418,12 @@ async function performTranslation(sortedChapters, chapterMap) {
 
     for (let i = 0; i < chaptersToProcess.length; i++) {
         const ch = chaptersToProcess[i];
+        if (ch.isTOC) {
+            console.log(
+                `🚀 [${i + 1}/${chaptersToProcess.length}] Skipping TOC for direct translation: "${ch.title}"`,
+            );
+            continue;
+        }
         console.log(
             `🚀 [${i + 1}/${chaptersToProcess.length}] Processing Chapter: "${ch.title}"`,
         );
@@ -420,21 +434,9 @@ async function performTranslation(sortedChapters, chapterMap) {
     }
 }
 
-async function synchronizeHeadings(chapterMap, zipEntries) {
-    console.log("\n🧐 Step 3: Synchronizing Headings (Strong Binding)...");
-
-    const ncxEntry = zipEntries.find((e) => e.entryName.endsWith(".ncx"));
-    let ncxContent = "";
-    let $ncx = null;
-
-    if (ncxEntry) {
-        ncxContent = ncxEntry.getData().toString("utf8");
-        $ncx = cheerio.load(ncxContent, {
-            xmlMode: true,
-            decodeEntities: false,
-        });
-    }
-
+// 拆分后的函数 1: 统一并标准化 HTML 中的标题格式
+async function standardizeHeadingFormats(chapterMap) {
+    console.log("\n🧐 Step 3: Standardizing Heading Formats in HTML...");
     const headingSelectors = "h1, h2, h3, h4, h5, h6";
     const uniqueHeadings = new Set();
 
@@ -452,10 +454,10 @@ async function synchronizeHeadings(chapterMap, zipEntries) {
     let corrections = {};
     if (uniqueHeadings.size > 0) {
         const prompt = `
-        You are a professional copy editor. Standardize chapter headings.
-        RULES: "Chapter X" -> "第X章" (Arabic numerals).
-            Example Input: ["第一章 开始", "第2章 中间", "Conclusion", "第3章<br/><br/>结束"]
-    Example Output: { "第一章 开始": "第1章 开始", "第2章 中间": "第2章 中间", "Conclusion": "Conclusion", "第3章<br/><br/>结束": "第3章 结束"}
+You are a professional copy editor. Standardize chapter headings.
+RULES: "Chapter X" -> "第X章" (Arabic numerals).
+Example Input: ["第一章 开始", "第2章 中间", "Conclusion", "第3章<br/><br/>结束"]
+Example Output: { "第一章 开始": "第1章 开始", "第2章 中间": "第2章 中间", "Conclusion": "Conclusion", "第3章<br/><br/>结束": "第3章 结束"}
         `;
         try {
             const responseText = await callAI(
@@ -467,27 +469,49 @@ async function synchronizeHeadings(chapterMap, zipEntries) {
                 responseText.replace(/```json|```/g, "").trim(),
             );
         } catch (e) {
-            console.warn("    ⚠️ Heading AI standardization failed.");
+            console.error("Standardization AI failed, skipping formatting.");
         }
     }
+
+    for (const data of chapterMap.values()) {
+        const $html = cheerio.load(data.html, {
+            xmlMode: true,
+            decodeEntities: false,
+        });
+        let changed = false;
+        $html(headingSelectors).each((_, el) => {
+            const original = $html(el).text().trim();
+            const corrected = corrections[original] || original;
+            if (original !== corrected) {
+                $html(el).text(corrected);
+                changed = true;
+            }
+        });
+        if (changed) data.html = $html.html();
+    }
+}
+
+// 拆分后的函数 2: 同步 NCX 目录文件
+async function synchronizeNcx(chapterMap, zipEntries) {
+    console.log("\n🔗 Step 5: Synchronizing NCX Metadata...");
+    const ncxEntry = zipEntries.find((e) => e.entryName.endsWith(".ncx"));
+    if (!ncxEntry) return { ncxEntry: null, ncxContent: "" };
+
+    const ncxContent = ncxEntry.getData().toString("utf8");
+    const $ncx = cheerio.load(ncxContent, {
+        xmlMode: true,
+        decodeEntities: false,
+    });
+    const headingSelectors = "h1, h2, h3, h4, h5, h6";
 
     for (const [id, data] of chapterMap) {
         const $html = cheerio.load(data.html, {
             xmlMode: true,
             decodeEntities: false,
         });
-        let firstTitle = null;
+        const firstTitle = $html(headingSelectors).first().text().trim();
 
-        $html(headingSelectors).each((i, el) => {
-            const original = $html(el).text().trim();
-            const corrected = corrections[original] || original;
-            if (original !== corrected) $html(el).text(corrected);
-            if (i === 0) firstTitle = corrected;
-        });
-
-        data.html = $html.html();
-
-        if ($ncx && firstTitle) {
+        if (firstTitle) {
             let $nav = $ncx(`navPoint[id="${id}"]`);
             if ($nav.length === 0) {
                 const fn = path.basename(data.href);
@@ -499,15 +523,40 @@ async function synchronizeHeadings(chapterMap, zipEntries) {
                 $nav.find("navLabel > text").first().text(firstTitle);
         }
     }
+    return { ncxEntry, ncxContent: $ncx.xml() };
+}
 
-    return {
-        ncxEntry,
-        ncxContent: $ncx ? $ncx.xml() : ncxContent,
-    };
+async function synchronizeTocHtml(chapterMap, tocId) {
+    if (!tocId || !chapterMap.has(tocId)) return;
+    console.log("\n🔗 Step 4: Synchronizing HTML TOC via Hrefs...");
+
+    const tocData = chapterMap.get(tocId);
+    const $toc = cheerio.load(tocData.html, {
+        xmlMode: true,
+        decodeEntities: false,
+    });
+    const allChapters = Array.from(chapterMap.values());
+
+    $toc("a[href]").each((_, el) => {
+        const $a = $toc(el);
+        const href = $a.attr("href");
+        const targetChapter = allChapters.find((ch) =>
+            href.includes(path.basename(ch.href)),
+        );
+
+        if (targetChapter && targetChapter.id !== tocId) {
+            const $temp = cheerio.load(targetChapter.html);
+            const translatedTitle = $temp("h1, h2, h3").first().text().trim();
+            if (translatedTitle) {
+                $a.text(translatedTitle);
+            }
+        }
+    });
+    tocData.html = $toc.html();
 }
 
 async function saveEpub(zip, chapterMap, ncxEntry, ncxContent) {
-    console.log(`\n💾 Step 4: Finalizing and Saving...`);
+    console.log(`\n💾 Step 6: Finalizing and Saving...`);
     for (const [id, data] of chapterMap.entries()) {
         zip.updateFile(data.entryName, Buffer.from(data.html, "utf8"));
     }
@@ -529,15 +578,27 @@ const main = async () => {
     const epub = await EPub.createAsync(inputPath);
     const zipEntries = zip.getEntries();
 
-    const { chapterMap, sortedChapters } = await analyzeStructure(
+    const { chapterMap, sortedChapters, tocId } = await analyzeStructure(
         epub,
         zipEntries,
     );
+
+    // 1. 翻译全文内容
     await performTranslation(sortedChapters, chapterMap);
-    const { ncxEntry, ncxContent } = await synchronizeHeadings(
+
+    // 2. 标准化标题格式 (第X章)
+    await standardizeHeadingFormats(chapterMap);
+
+    // 3. 同步 HTML 内的目录链接
+    await synchronizeTocHtml(chapterMap, tocId);
+
+    // 4. 同步 NCX 元数据
+    const { ncxEntry, ncxContent } = await synchronizeNcx(
         chapterMap,
         zipEntries,
     );
+
+    // 5. 保存
     await saveEpub(zip, chapterMap, ncxEntry, ncxContent);
 };
 
