@@ -16,9 +16,9 @@ const __dirname = path.dirname(__filename);
 // =================== 1. 核心设置 ===================
 const INPUT_FILE_NAME =
     "One from Many VISA and the Rise of Chaordic Organization (VISA InternationalHock, Dee) (Z-Library).epub";
-const CURRENT_PROVIDER = "mimo";
+const CURRENT_PROVIDER = "qwen";
 
-const TEST_MODE_LIMIT = 5; // Set to null to process the entire book
+const TEST_MODE_LIMIT = null; // Set to null to process the entire book
 
 const CONFIG = {
     targetLanguage: "Chinese (Simplified)",
@@ -28,7 +28,7 @@ const CONFIG = {
         concurrency: 1,
     },
     qwen: {
-        apiKey: process.env.DASHSCOPE_API_KEY,
+        apiKey: process.env.QWEN_API_KEY,
         baseURL: "https://dashscope.aliyuncs.com/compatible-mode/v1",
         modelName: "qwen3-max",
         concurrency: 5,
@@ -185,33 +185,43 @@ OUTPUT: A JSON object:
     "order": ["chapter_01", "chapter_02", ...]
 }`;
 
-    try {
-        const responseText = await callAI(
-            JSON.stringify(simplifiedChapters),
-            agentPrompt,
-            true,
-        );
-        const result = JSON.parse(
-            responseText.replace(/```json|```/g, "").trim(),
-        );
+    let attempts = 0;
+    while (attempts < 3) {
+        try {
+            const responseText = await callAI(
+                JSON.stringify(simplifiedChapters),
+                agentPrompt,
+                true,
+            );
+            const result = JSON.parse(
+                responseText.replace(/```json|```/g, "").trim(),
+            );
 
-        const chapterMap = new Map(chapters.map((c) => [c.id, c]));
-        const ordered = result.order
-            .filter((id) => chapterMap.has(id))
-            .map((id) => {
-                const ch = chapterMap.get(id);
-                if (id === result.tocId) ch.isTOC = true;
-                chapterMap.delete(id);
-                return ch;
-            });
+            const chapterMap = new Map(chapters.map((c) => [c.id, c]));
+            const ordered = result.order
+                .filter((id) => chapterMap.has(id))
+                .map((id) => {
+                    const ch = chapterMap.get(id);
+                    if (id === result.tocId) ch.isTOC = true;
+                    chapterMap.delete(id);
+                    return ch;
+                });
 
-        return {
-            sorted: [...ordered, ...chapterMap.values()],
-            tocId: result.tocId,
-        };
-    } catch (e) {
-        console.error("Agent failed, using default order.");
-        return { sorted: chapters, tocId: null };
+            return {
+                sorted: [...ordered, ...chapterMap.values()],
+                tocId: result.tocId,
+            };
+        } catch (e) {
+            attempts++;
+            console.warn(`Agent plan attempt ${attempts} failed. Retrying...`);
+            if (attempts >= 3) {
+                console.error(
+                    "Agent failed after max retries, using default order.",
+                );
+                return { sorted: chapters, tocId: null };
+            }
+            await new Promise((r) => setTimeout(r, 2000));
+        }
     }
 };
 
@@ -459,17 +469,31 @@ RULES: "Chapter X" -> "第X章" (Arabic numerals).
 Example Input: ["第一章 开始", "第2章 中间", "Conclusion", "第3章<br/><br/>结束"]
 Example Output: { "第一章 开始": "第1章 开始", "第2章 中间": "第2章 中间", "Conclusion": "Conclusion", "第3章<br/><br/>结束": "第3章 结束"}
         `;
-        try {
-            const responseText = await callAI(
-                JSON.stringify(Array.from(uniqueHeadings)),
-                prompt,
-                true,
-            );
-            corrections = JSON.parse(
-                responseText.replace(/```json|```/g, "").trim(),
-            );
-        } catch (e) {
-            console.error("Standardization AI failed, skipping formatting.");
+        let attempts = 0;
+        while (attempts < 3) {
+            try {
+                const responseText = await callAI(
+                    JSON.stringify(Array.from(uniqueHeadings)),
+                    prompt,
+                    true,
+                );
+                corrections = JSON.parse(
+                    responseText.replace(/```json|```/g, "").trim(),
+                );
+                break; // Success
+            } catch (e) {
+                attempts++;
+                console.warn(
+                    `Standardization attempt ${attempts} failed. Retrying...`,
+                );
+                if (attempts >= 3) {
+                    console.error(
+                        "Standardization AI failed after max retries, skipping formatting.",
+                    );
+                } else {
+                    await new Promise((r) => setTimeout(r, 2000));
+                }
+            }
         }
     }
 
@@ -581,24 +605,19 @@ const main = async () => {
     const { chapterMap, sortedChapters, tocId } = await analyzeStructure(
         epub,
         zipEntries,
-    );
+    ); // 1. 翻译全文内容
 
-    // 1. 翻译全文内容
-    await performTranslation(sortedChapters, chapterMap);
+    await performTranslation(sortedChapters, chapterMap); // 2. 标准化标题格式 (第X章)
 
-    // 2. 标准化标题格式 (第X章)
-    await standardizeHeadingFormats(chapterMap);
+    await standardizeHeadingFormats(chapterMap); // 3. 同步 HTML 内的目录链接
 
-    // 3. 同步 HTML 内的目录链接
-    await synchronizeTocHtml(chapterMap, tocId);
+    await synchronizeTocHtml(chapterMap, tocId); // 4. 同步 NCX 元数据
 
-    // 4. 同步 NCX 元数据
     const { ncxEntry, ncxContent } = await synchronizeNcx(
         chapterMap,
         zipEntries,
-    );
+    ); // 5. 保存
 
-    // 5. 保存
     await saveEpub(zip, chapterMap, ncxEntry, ncxContent);
 };
 
