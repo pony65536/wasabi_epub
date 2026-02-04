@@ -11,7 +11,7 @@ import fs from "fs";
 import pkg from "natural";
 const { NGrams, WordTokenizer } = pkg;
 
-// =================== 0. ESM 环境兼容设置 ===================
+// =================== 1. ESM 环境兼容设置 ===================
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -31,10 +31,10 @@ const writeLog = (type, content) => {
     fs.appendFileSync(logFile, entry, "utf8");
 };
 
-// =================== 1. 核心设置 ===================
+// =================== 2. 核心设置 ===================
 
 const INPUT_FILE_NAME =
-    "One from Many VISA and the Rise of Chaordic Organization (VISA InternationalHock, Dee) (Z-Library).epub";
+    "The Essays of Warren Buffett Lessons for Corporate America, Fourth Edition (Cunningham, Lawrence A. Buffett, Warren E.) (Z-Library).epub";
 
 const CURRENT_PROVIDER = "qwen";
 const TEST_MODE_LIMIT = null;
@@ -60,7 +60,7 @@ const CONFIG = {
     },
 };
 
-// =================== 2. 翻译风格 ===================
+// =================== 3. 翻译风格 ===================
 
 const STYLE_GUIDE = `
 TRANSLATION STYLE GUIDE (Target: Chinese Simplified):
@@ -244,7 +244,7 @@ OUTPUT: A JSON object:
     }
 };
 
-// =================== 5.5. 术语表生成模块 (新增) ===================
+// =================== 6. 术语表生成模块 ===================
 
 const cleanText = (htmlContent) => {
     const $ = cheerio.load(htmlContent);
@@ -276,15 +276,15 @@ const getMostCommonNGrams = (words, n, topK) => {
 };
 
 const generateInitialGlossary = async (chapterMap) => {
-    console.log("\n📊 Step 1.5: Generating Initial Glossary...");
+    console.log("\n📊 Step 3: Generating Initial Glossary...");
     let glossary = {};
     try {
-        console.log("   - Reading and cleaning book content...");
+        console.log("    - Reading and cleaning book content...");
         let fullText = "";
         for (const chapter of chapterMap.values()) {
             fullText += cleanText(chapter.html) + " ";
         }
-        console.log("   - Tokenizing and calculating N-Grams...");
+        console.log("    - Tokenizing and calculating N-Grams...");
         const tokenizer = new WordTokenizer();
         const words = tokenizer
             .tokenize(fullText.toLowerCase())
@@ -307,7 +307,7 @@ const generateInitialGlossary = async (chapterMap) => {
             bigrams: formatList(biGrams),
             trigrams: formatList(triGrams),
         });
-        console.log("   - Sending candidate terms to AI for selection...");
+        console.log("    - Sending candidate terms to AI for selection...");
         const userPrompt = `我想翻译一本电子书，现在使用 n-gram 算法初步筛选了候选词列表。
 请你挑选其中容易导致翻译上下文翻译不一致的词组，尤其挑选日常生活中不常见的用法，但是高频出现在书中的部分，并以 JSON 格式输出。
 输出格式如下，且不要包含任何多余说明文字，只返回纯 JSON 列表：
@@ -338,24 +338,24 @@ const generateInitialGlossary = async (chapterMap) => {
                 }
             }
             console.log(
-                `   - ✅ Glossary generated with ${newTerms.length} terms.`,
+                `    - ✅ Glossary generated with ${newTerms.length} terms.`,
             );
             writeLog("GLOSSARY", JSON.stringify(newTerms, null, 2));
         } else {
-            console.log("   - ⚠️ No terms were suggested by the AI.");
+            console.log("    - ⚠️ No terms were suggested by the AI.");
         }
     } catch (error) {
-        console.error("   - ❌ Failed to generate glossary:", error.message);
+        console.error("    - ❌ Failed to generate glossary:", error.message);
         writeLog(
             "ERROR",
             `Glossary Generation Failed: ${error.stack || error.message}`,
         );
     }
-    console.log("   - Glossary generation step completed.\n");
+    console.log("    - Glossary generation step completed.\n");
     return glossary;
 };
 
-// =================== 6. 任务队列初始化 ===================
+// =================== 7. 任务队列初始化 ===================
 
 const batchQueue = new Queue(
     async (task, cb) => {
@@ -392,7 +392,7 @@ ${STYLE_GUIDE}
 
 🛑 RULES:
 1. Return each node as: <node id="node_x">translated text</node>
-2. Keep inline tags (<a>, <strong>, etc.) intact.
+2. Keep inline tags (<a>, <strong>, </node> etc.) intact.
                 `;
 
                 const rawResponse = await callAI(batchInput, prompt, false);
@@ -427,7 +427,7 @@ ${STYLE_GUIDE}
     { concurrent: CONFIG[CURRENT_PROVIDER].concurrency, maxRetries: 0 },
 );
 
-// =================== 7. 翻译 HTML 内容 ===================
+// =================== 8. 翻译 HTML 内容 ===================
 const translateHtmlContent = async (htmlContent, chapterTitle, glossary) => {
     const $ = cheerio.load(htmlContent, {
         xmlMode: true,
@@ -496,8 +496,14 @@ const translateHtmlContent = async (htmlContent, chapterTitle, glossary) => {
         if (failedNodes.length === 0) break;
 
         console.log(
-            `   - ⚠️ Retrying ${failedNodes.length} failed nodes (Round ${retryRound}/${MAX_RETRY_ROUNDS})...`,
+            `    - ⚠️ Retrying ${failedNodes.length} failed nodes (Round ${retryRound}/${MAX_RETRY_ROUNDS})...`,
         );
+
+        writeLog(
+            "RETRY_INFO",
+            `Round ${retryRound} - Retrying nodes:\n${failedNodes.map((n) => `ID: ${n.id} | Content: ${n.content.substring(0, 100)}...`).join("\n")}`,
+        );
+
         await processInBatches(failedNodes);
         retryRound++;
     }
@@ -506,32 +512,10 @@ const translateHtmlContent = async (htmlContent, chapterTitle, glossary) => {
     return $.html();
 };
 
-// =================== 8. 步骤封装函数 ===================
-async function analyzeStructure(epub, zipEntries) {
-    console.log("📖 Step 1: Analyzing Book Structure...");
-    const chapterMap = new Map();
-    const rawChapters = epub.flow.map((chapter) => {
-        const zipEntry = zipEntries.find((e) =>
-            decodeURIComponent(e.entryName).endsWith(
-                decodeURIComponent(chapter.href),
-            ),
-        );
-        const html = zipEntry ? zipEntry.getData().toString("utf8") : "";
-        const data = {
-            ...chapter,
-            html,
-            entryName: zipEntry?.entryName,
-            title: chapter.title || extractHeading(html) || "Untitled",
-        };
-        if (data.entryName) chapterMap.set(data.id, data);
-        return data;
-    });
-    const { sorted, tocId } = await planTranslationOrder(rawChapters);
-    return { chapterMap, sortedChapters: sorted, tocId };
-}
+// =================== 9. 核心步骤函数 ===================
 
 async function performTranslation(sortedChapters, chapterMap, glossary) {
-    console.log("\n✍️ Step 2: Translating Book Content...");
+    console.log("\n✍️ Step 4: Translating Book Content...");
     const chaptersToProcess = sortedChapters.slice(
         0,
         TEST_MODE_LIMIT || sortedChapters.length,
@@ -560,7 +544,7 @@ async function performTranslation(sortedChapters, chapterMap, glossary) {
 }
 
 async function standardizeHeadingFormats(chapterMap) {
-    console.log("\n🧐 Step 3: Standardizing Heading Formats...");
+    console.log("\n🧐 Step 5: Standardizing Heading Formats...");
     const headingSelectors = "h1, h2, h3, h4, h5, h6";
     const uniqueHeadings = new Set();
     for (const data of chapterMap.values()) {
@@ -622,8 +606,39 @@ Example Output: { "第一章 开始": "第1章 开始", "第2章 中间": "第2�
     }
 }
 
+async function synchronizeTocHtml(chapterMap, tocId) {
+    if (!tocId || !chapterMap.has(tocId)) return;
+    console.log("\n🔗 Step 6: Synchronizing HTML TOC...");
+    try {
+        const tocData = chapterMap.get(tocId);
+        const $toc = cheerio.load(tocData.html, {
+            xmlMode: true,
+            decodeEntities: false,
+        });
+        const allChapters = Array.from(chapterMap.values());
+        $toc("a[href]").each((_, el) => {
+            const $a = $toc(el);
+            const href = $a.attr("href");
+            const targetChapter = allChapters.find((ch) =>
+                href.includes(path.basename(ch.href)),
+            );
+            if (targetChapter && targetChapter.id !== tocId) {
+                const $temp = cheerio.load(targetChapter.html);
+                const translatedTitle = $temp("h1, h2, h3")
+                    .first()
+                    .text()
+                    .trim();
+                if (translatedTitle) $a.text(translatedTitle);
+            }
+        });
+        tocData.html = $toc.html();
+    } catch (e) {
+        writeLog("ERROR", `HTML TOC Sync Failed: ${e.stack || e.message}`);
+    }
+}
+
 async function synchronizeNcx(chapterMap, zipEntries) {
-    console.log("\n🔗 Step 5: Synchronizing NCX Metadata...");
+    console.log("\n🔗 Step 7: Synchronizing NCX Metadata...");
     try {
         const ncxEntry = zipEntries.find((e) => e.entryName.endsWith(".ncx"));
         if (!ncxEntry) return { ncxEntry: null, ncxContent: "" };
@@ -658,39 +673,8 @@ async function synchronizeNcx(chapterMap, zipEntries) {
     }
 }
 
-async function synchronizeTocHtml(chapterMap, tocId) {
-    if (!tocId || !chapterMap.has(tocId)) return;
-    console.log("\n🔗 Step 4: Synchronizing HTML TOC...");
-    try {
-        const tocData = chapterMap.get(tocId);
-        const $toc = cheerio.load(tocData.html, {
-            xmlMode: true,
-            decodeEntities: false,
-        });
-        const allChapters = Array.from(chapterMap.values());
-        $toc("a[href]").each((_, el) => {
-            const $a = $toc(el);
-            const href = $a.attr("href");
-            const targetChapter = allChapters.find((ch) =>
-                href.includes(path.basename(ch.href)),
-            );
-            if (targetChapter && targetChapter.id !== tocId) {
-                const $temp = cheerio.load(targetChapter.html);
-                const translatedTitle = $temp("h1, h2, h3")
-                    .first()
-                    .text()
-                    .trim();
-                if (translatedTitle) $a.text(translatedTitle);
-            }
-        });
-        tocData.html = $toc.html();
-    } catch (e) {
-        writeLog("ERROR", `HTML TOC Sync Failed: ${e.stack || e.message}`);
-    }
-}
-
 async function saveEpub(zip, chapterMap, ncxEntry, ncxContent) {
-    console.log(`\n💾 Step 6: Finalizing and Saving...`);
+    console.log(`\n💾 Step 8: Finalizing and Saving...`);
     try {
         for (const [id, data] of chapterMap.entries()) {
             zip.updateFile(data.entryName, Buffer.from(data.html, "utf8"));
@@ -705,28 +689,60 @@ async function saveEpub(zip, chapterMap, ncxEntry, ncxContent) {
     }
 }
 
-// =================== 9. 主流程 ===================
+// =================== 10. 主流程 ===================
 const main = async () => {
     initClient();
     console.log(`\n========================================`);
     console.log(`📖 Input: ${path.basename(inputPath)}`);
     console.log(`========================================\n`);
     try {
+        // Step 1: 读取 EPUB 内容
+        console.log("📖 Step 1: Reading EPUB Content...");
         const zip = new AdmZip(inputPath);
         const epub = await EPub.createAsync(inputPath);
         const zipEntries = zip.getEntries();
-        const { chapterMap, sortedChapters, tocId } = await analyzeStructure(
-            epub,
-            zipEntries,
-        );
+        const chapterMap = new Map();
+        const rawChapters = epub.flow.map((chapter) => {
+            const zipEntry = zipEntries.find((e) =>
+                decodeURIComponent(e.entryName).endsWith(
+                    decodeURIComponent(chapter.href),
+                ),
+            );
+            const html = zipEntry ? zipEntry.getData().toString("utf8") : "";
+            const data = {
+                ...chapter,
+                html,
+                entryName: zipEntry?.entryName,
+                title: chapter.title || extractHeading(html) || "Untitled",
+            };
+            if (data.entryName) chapterMap.set(data.id, data);
+            return data;
+        });
+
+        // Step 2: 制定翻译计划
+        console.log("📖 Step 2: Planning Translation Order...");
+        const { sorted: sortedChapters, tocId } =
+            await planTranslationOrder(rawChapters);
+
+        // Step 3: 生成术语表
         const glossary = await generateInitialGlossary(chapterMap);
+
+        // Step 4: 执行翻译
         await performTranslation(sortedChapters, chapterMap, glossary);
+
+        // Step 5: 标题标准化
         await standardizeHeadingFormats(chapterMap);
+
+        // Step 6: 同步 HTML 目录
         await synchronizeTocHtml(chapterMap, tocId);
+
+        // Step 7: 同步 NCX 元数据
         const { ncxEntry, ncxContent } = await synchronizeNcx(
             chapterMap,
             zipEntries,
         );
+
+        // Step 8: 保存文件
         await saveEpub(zip, chapterMap, ncxEntry, ncxContent);
     } catch (e) {
         writeLog("ERROR", `Main Process Fatal Error: ${e.stack || e.message}`);
