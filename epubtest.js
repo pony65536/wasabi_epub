@@ -8,7 +8,7 @@ import path from "path";
 import { fileURLToPath } from "url";
 import Queue from "better-queue";
 import fs from "fs";
-import pkg from "natural"; // 新增：引入 natural 库
+import pkg from "natural";
 const { NGrams, WordTokenizer } = pkg;
 
 // =================== 0. ESM 环境兼容设置 ===================
@@ -76,7 +76,10 @@ HEADING FORMATTING RULES:
 // =================== 4. AI 初始化与调用 ===================
 
 const fileInfo = path.parse(INPUT_FILE_NAME);
-const activeModelName = CONFIG[CURRENT_PROVIDER].modelName.replace(/[\/\\]/g, "-");
+const activeModelName = CONFIG[CURRENT_PROVIDER].modelName.replace(
+    /[\/\\]/g,
+    "-",
+);
 
 const inputPath = path.resolve(__dirname, INPUT_FILE_NAME);
 const outputPath = path.resolve(
@@ -242,17 +245,13 @@ OUTPUT: A JSON object:
 };
 
 // =================== 5.5. 术语表生成模块 (新增) ===================
-/**
- * 提取 HTML 中的纯文本并进行基础清洗
- */
+
 const cleanText = (htmlContent) => {
     const $ = cheerio.load(htmlContent);
     const text = $.text();
     return text.replace(/\s+/g, " ").trim();
 };
-/**
- * 返回第一次匹配处的上下文片段
- */
+
 const getContext = (text, term, window = 40) => {
     try {
         const index = text.toLowerCase().indexOf(term.toLowerCase());
@@ -264,9 +263,7 @@ const getContext = (text, term, window = 40) => {
         return "";
     }
 };
-/**
- * 统计 N-Grams 频率
- */
+
 const getMostCommonNGrams = (words, n, topK) => {
     const ngrams = NGrams.ngrams(words, n).map((g) => g.join(" "));
     const counts = ngrams.reduce((acc, val) => {
@@ -277,10 +274,8 @@ const getMostCommonNGrams = (words, n, topK) => {
         .sort((a, b) => b[1] - a[1])
         .slice(0, topK);
 };
-/**
- * 根据全书内容生成初始术语表
- */
-const generateInitialGlossary = async (chapterMap) =>{
+
+const generateInitialGlossary = async (chapterMap) => {
     console.log("\n📊 Step 1.5: Generating Initial Glossary...");
     let glossary = {};
     try {
@@ -291,21 +286,22 @@ const generateInitialGlossary = async (chapterMap) =>{
         }
         console.log("   - Tokenizing and calculating N-Grams...");
         const tokenizer = new WordTokenizer();
-        // 简单模拟 Python 的去停用词
         const words = tokenizer
             .tokenize(fullText.toLowerCase())
             .filter(
                 (w) =>
                     w.length > 1 &&
-                    !/^(the|and|a|of|to|in|is|it|that|with|as|for|was)$/.test(w),
+                    !/^(the|and|a|of|to|in|is|it|that|with|as|for|was)$/.test(
+                        w,
+                    ),
             );
         const biGrams = getMostCommonNGrams(words, 2, 25);
         const triGrams = getMostCommonNGrams(words, 3, 25);
         const formatList = (list) =>
             list.map(([term, count]) => ({
-                "term": term,
-                "context": getContext(fullText, term),
-                "count": count,
+                term: term,
+                context: getContext(fullText, term),
+                count: count,
             }));
         const payload = JSON.stringify({
             bigrams: formatList(biGrams),
@@ -329,11 +325,11 @@ const generateInitialGlossary = async (chapterMap) =>{
         const systemInstruction =
             "You are a helpful assistant that outputs only JSON.";
         const llmReply = await callAI(userPrompt, systemInstruction, true);
-        
-        // --- 修改部分开始 ---
-        const parsedResponse = JSON.parse(llmReply.replace(/```json|```/g, "").trim());
-        const newTerms = parsedResponse.glossary || []; 
-        // --- 修改部分结束 ---
+
+        const parsedResponse = JSON.parse(
+            llmReply.replace(/```json|```/g, "").trim(),
+        );
+        const newTerms = parsedResponse.glossary || [];
 
         if (Array.isArray(newTerms) && newTerms.length > 0) {
             for (const item of newTerms) {
@@ -356,23 +352,27 @@ const generateInitialGlossary = async (chapterMap) =>{
         );
     }
     console.log("   - Glossary generation step completed.\n");
-    return glossary; // 确保返回 glossary
-}
+    return glossary;
+};
 
 // =================== 6. 任务队列初始化 ===================
 
 const batchQueue = new Queue(
     async (task, cb) => {
-        const { batch, chapterTitle, $parent, glossary } = task; // 获取 glossary
+        const { batch, chapterTitle, $parent, glossary } = task;
         const MAX_ATTEMPTS = 3;
 
         let attempts = 0;
         let success = false;
 
-        // 格式化术语表为字符串
-        const glossaryMarkdown = glossary && Object.keys(glossary).length > 0 
-            ? `\nGLOSSARY (Strictly follow these translations):\n${Object.entries(glossary).map(([en, zh]) => `- ${en}: ${zh}`).join('\n')}\n`
-            : "";
+        const glossaryMarkdown =
+            glossary && Object.keys(glossary).length > 0
+                ? `\nGLOSSARY (Strictly follow these translations):\n${Object.entries(
+                      glossary,
+                  )
+                      .map(([en, zh]) => `- ${en}: ${zh}`)
+                      .join("\n")}\n`
+                : "";
 
         while (!success && attempts < MAX_ATTEMPTS) {
             try {
@@ -397,9 +397,6 @@ ${STYLE_GUIDE}
 
                 const rawResponse = await callAI(batchInput, prompt, false);
 
-                const matchedResults = new Map();
-                let nodesFoundCount = 0;
-
                 for (const node of batch) {
                     const nodeRegex = new RegExp(
                         `<node id="${node.id}">([\\s\\S]*?)<\/node>`,
@@ -407,22 +404,8 @@ ${STYLE_GUIDE}
                     );
                     const match = rawResponse.match(nodeRegex);
                     if (match && match[1]) {
-                        matchedResults.set(node.id, match[1].trim());
-                        nodesFoundCount++;
-                    }
-                }
-
-                if (nodesFoundCount < batch.length * 0.8) {
-                    throw new Error(
-                        `AI response corrupted. Found ${nodesFoundCount}/${batch.length} nodes.`,
-                    );
-                }
-
-                for (const node of batch) {
-                    const translatedText = matchedResults.get(node.id);
-                    if (translatedText) {
                         $parent(`[data-t-id="${node.id}"]`)
-                            .html(translatedText)
+                            .html(match[1].trim())
                             .removeAttr("data-t-id");
                     }
                 }
@@ -445,7 +428,7 @@ ${STYLE_GUIDE}
 );
 
 // =================== 7. 翻译 HTML 内容 ===================
-const translateHtmlContent = async (htmlContent, chapterTitle, glossary) => { // 传入 glossary
+const translateHtmlContent = async (htmlContent, chapterTitle, glossary) => {
     const $ = cheerio.load(htmlContent, {
         xmlMode: true,
         decodeEntities: false,
@@ -460,8 +443,10 @@ const translateHtmlContent = async (htmlContent, chapterTitle, glossary) => { //
             nodesToTranslate.push({ id: nodeId, content: originalHtml });
         }
     });
+
     if (nodesToTranslate.length === 0) return $.html();
     const BATCH_SIZE_LIMIT = 5000;
+
     const processInBatches = async (nodeList) => {
         const batches = [];
         let currentBatch = [];
@@ -479,10 +464,11 @@ const translateHtmlContent = async (htmlContent, chapterTitle, glossary) => { //
             currentLength += node.content.length;
         }
         if (currentBatch.length > 0) batches.push(currentBatch);
+
         const promises = batches.map((batch) => {
             return new Promise((resolve) => {
                 batchQueue
-                    .push({ batch, chapterTitle, $parent: $, glossary }) // 传递给 queue
+                    .push({ batch, chapterTitle, $parent: $, glossary })
                     .on("finish", () => resolve())
                     .on("failed", (err) => {
                         writeLog("ERROR", `Batch Task Failed: ${err?.message}`);
@@ -492,15 +478,30 @@ const translateHtmlContent = async (htmlContent, chapterTitle, glossary) => { //
         });
         await Promise.all(promises);
     };
+
     await processInBatches(nodesToTranslate);
-    const failedNodes = [];
-    $("[data-t-id]").each((_, el) => {
-        failedNodes.push({
-            id: $(el).attr("data-t-id"),
-            content: $(el).html(),
+
+    let retryRound = 1;
+    const MAX_RETRY_ROUNDS = 3;
+
+    while (retryRound <= MAX_RETRY_ROUNDS) {
+        const failedNodes = [];
+        $("[data-t-id]").each((_, el) => {
+            failedNodes.push({
+                id: $(el).attr("data-t-id"),
+                content: $(el).html(),
+            });
         });
-    });
-    if (failedNodes.length > 0) await processInBatches(failedNodes);
+
+        if (failedNodes.length === 0) break;
+
+        console.log(
+            `   - ⚠️ Retrying ${failedNodes.length} failed nodes (Round ${retryRound}/${MAX_RETRY_ROUNDS})...`,
+        );
+        await processInBatches(failedNodes);
+        retryRound++;
+    }
+
     $("[data-t-id]").removeAttr("data-t-id");
     return $.html();
 };
@@ -545,7 +546,7 @@ async function performTranslation(sortedChapters, chapterMap, glossary) {
             const translatedHtml = await translateHtmlContent(
                 ch.html,
                 ch.title,
-                glossary, // 传入术语表
+                glossary,
             );
             if (chapterMap.has(ch.id))
                 chapterMap.get(ch.id).html = translatedHtml;
@@ -714,14 +715,11 @@ const main = async () => {
         const zip = new AdmZip(inputPath);
         const epub = await EPub.createAsync(inputPath);
         const zipEntries = zip.getEntries();
-        
         const { chapterMap, sortedChapters, tocId } = await analyzeStructure(
             epub,
             zipEntries,
         );
-        // 修改点：使用 await 并接收返回的 glossary 对象
         const glossary = await generateInitialGlossary(chapterMap);
-        
         await performTranslation(sortedChapters, chapterMap, glossary);
         await standardizeHeadingFormats(chapterMap);
         await synchronizeTocHtml(chapterMap, tocId);

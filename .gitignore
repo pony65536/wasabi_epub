@@ -1,4 +1,5 @@
 node_modules
-One from Many VISA and the Rise of Chaordic Organization (VISA InternationalHock, Dee) (Z-Library).epub
+*.epub
 .env
+log
 package-lock.json
