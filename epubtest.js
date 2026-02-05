@@ -36,8 +36,8 @@ const writeLog = (type, content) => {
 const INPUT_FILE_NAME =
     "The Essays of Warren Buffett Lessons for Corporate America, Fourth Edition (Cunningham, Lawrence A. Buffett, Warren E.) (Z-Library).epub";
 
-const CURRENT_PROVIDER = "qwen";
-const TEST_MODE_LIMIT = null;
+const CURRENT_PROVIDER = "mimo";
+const TEST_MODE_LIMIT = 1;
 
 const CONFIG = {
     targetLanguage: "Chinese (Simplified)",
@@ -379,14 +379,31 @@ const batchQueue = new Queue(
                 attempts++;
 
                 const batchInput = batch
-                    .map((n) => `<node id="${n.id}">${n.content}</node>`)
+                    .map((n) => {
+                        let content = n.content;
+
+                        const mergeRegex =
+                            /([A-Za-z])<(small|span|strong|em)[^>]*>([\s\S]*?)<\/\2>/gi;
+
+                        let preProcessedContent = content.replace(
+                            mergeRegex,
+                            (match, p1, p2, p3) => {
+                                if (!p3.includes("<")) {
+                                    return p1 + p3;
+                                }
+                                return match;
+                            },
+                        );
+
+                        return `<node id="${n.id}">${preProcessedContent}</node>`;
+                    })
                     .join("\n");
 
                 const prompt = `
 TASK: Translate the content of each <node> into ${CONFIG.targetLanguage}.
 
 CONTEXT: Book Chapter "${chapterTitle}".
-use glossary information when translating.
+Use glossary information when translating.
 ${glossaryMarkdown}
 ${STYLE_GUIDE}
 
@@ -404,9 +421,19 @@ ${STYLE_GUIDE}
                     );
                     const match = rawResponse.match(nodeRegex);
                     if (match && match[1]) {
-                        $parent(`[data-t-id="${node.id}"]`)
-                            .html(match[1].trim())
-                            .removeAttr("data-t-id");
+                        const translatedContent = match[1].trim();
+
+                        try {
+                            cheerio.load(translatedContent, { xmlMode: true });
+                            $parent(`[data-t-id="${node.id}"]`)
+                                .html(translatedContent)
+                                .removeAttr("data-t-id");
+                        } catch (xmlError) {
+                            writeLog(
+                                "ERROR",
+                                `Node ${node.id} XHTML Validation Failed: ${xmlError.message}`,
+                            );
+                        }
                     }
                 }
 
@@ -415,9 +442,7 @@ ${STYLE_GUIDE}
             } catch (e) {
                 writeLog(
                     "ERROR",
-                    `Batch Queue Attempt ${attempts} Failed: ${
-                        e.stack || e.message
-                    }`,
+                    `Batch Queue Attempt ${attempts} Failed: ${e.stack || e.message}`,
                 );
                 if (attempts >= MAX_ATTEMPTS) cb(e);
                 else await new Promise((r) => setTimeout(r, 2000));
@@ -496,7 +521,7 @@ const translateHtmlContent = async (htmlContent, chapterTitle, glossary) => {
         if (failedNodes.length === 0) break;
 
         console.log(
-            `    - ⚠️ Retrying ${failedNodes.length} failed nodes (Round ${retryRound}/${MAX_RETRY_ROUNDS})...`,
+            `    - ⚠️ Retrying ${failedNodes.length} invalid XHTML nodes (Round ${retryRound}/${MAX_RETRY_ROUNDS})...`,
         );
 
         writeLog(
@@ -514,7 +539,7 @@ const translateHtmlContent = async (htmlContent, chapterTitle, glossary) => {
 
 // =================== 9. 核心步骤函数 ===================
 
-async function performTranslation(sortedChapters, chapterMap, glossary) {
+const performTranslation = async (sortedChapters, chapterMap, glossary) => {
     console.log("\n✍️ Step 4: Translating Book Content...");
     const chaptersToProcess = sortedChapters.slice(
         0,
@@ -541,139 +566,272 @@ async function performTranslation(sortedChapters, chapterMap, glossary) {
             );
         }
     }
-}
+};
 
-async function standardizeHeadingFormats(chapterMap) {
+const standardizeHeadingFormats = async (chapterMap) => {
     console.log("\n🧐 Step 5: Standardizing Heading Formats...");
+
     const headingSelectors = "h1, h2, h3, h4, h5, h6";
     const uniqueHeadings = new Set();
-    for (const data of chapterMap.values()) {
-        const $temp = cheerio.load(data.html, {
+
+    // 1. Extract original HTML fragments
+    for (const { html } of chapterMap.values()) {
+        const $temp = cheerio.load(html, {
             xmlMode: true,
             decodeEntities: false,
         });
         $temp(headingSelectors).each((_, el) => {
-            const txt = $temp(el).text().trim();
-            if (txt) uniqueHeadings.add(txt);
+            const htmlContent = $temp(el).html()?.trim();
+            if (htmlContent) uniqueHeadings.add(htmlContent);
         });
     }
+
+    if (uniqueHeadings.size === 0) {
+        console.log("ℹ️ No headings found to process.");
+        return;
+    }
+
     let corrections = {};
-    if (uniqueHeadings.size > 0) {
-        const prompt = `
-You are a professional copy editor. Standardize chapter headings. Please output your response in JSON format.
-RULES: "Chapter X" -> "第X章" (Arabic numerals).
-Example Input: ["第一章 开始", "第2章 中间", "Conclusion", "第3章<br/><br/>结束"]
-Example Output: { "第一章 开始": "第1章 开始", "第2章 中间": "第2章 中间", "Conclusion": "Conclusion", "第3章<br/><br/>结束": "第3章 结束"}
-        `;
-        let attempts = 0;
-        while (attempts < 3) {
-            try {
-                const responseText = await callAI(
-                    JSON.stringify(Array.from(uniqueHeadings)),
-                    prompt,
-                    true,
+    const prompt = `Role: XHTML Copy Editor. Task: STANDARDIZE HEADING FORMATS ONLY.
+
+STRICT CONSTRAINTS:
+
+    NO translation, paraphrasing, or rewriting. Original text must be preserved character-for-character.
+
+    Only modify: Structural markers (numbering/prefixes) and Hierarchy consistency.
+
+    Whitespace Normalization:
+
+        REMOVE: Leading/trailing spaces, \t, \n, \r, and repeated spaces.
+
+        KEEP: Single spaces between English words or meaningful title spacing.
+
+    XHTML: Use self-closing tags (e.g.,
+
+    ).
+
+TASK RULES:
+
+    Unify style for same-level headings (e.g., consistency in "Chapter X" vs "Chapter X").
+
+    Do NOT introduce new language styles or translate (e.g., keep English as English).
+Example:
+Input:
+["old_title_1", "old_title_2", "old_title_3"]
+
+Output:
+{
+  "old_title_1": "new_title_1",
+  "old_title_2": "new_title_2",
+  "old_title_3": "new_title_3"
+}
+`;
+
+    for (let attempts = 1; attempts <= 3; attempts++) {
+        try {
+            const responseText = await callAI(
+                JSON.stringify([...uniqueHeadings]),
+                prompt,
+                true,
+            );
+
+            const cleanJson = JSON.parse(
+                responseText.replace(/```json|```/g, "").trim(),
+            );
+
+            corrections = Object.entries(cleanJson).reduce(
+                (acc, [key, value]) => {
+                    acc[key] = validateAndFixXHTML(value);
+                    return acc;
+                },
+                {},
+            );
+
+            break;
+        } catch (error) {
+            writeLog("ERROR", `Attempt ${attempts} failed: ${error.message}`);
+            if (attempts === 3) {
+                console.log(
+                    "❌ Failed to get AI corrections after 3 attempts.",
                 );
-                corrections = JSON.parse(
-                    responseText.replace(/```json|```/g, "").trim(),
-                );
-                break;
-            } catch (e) {
-                attempts++;
-                writeLog(
-                    "ERROR",
-                    `Heading Standardize Attempt ${attempts} Failed: ${e.stack || e.message}`,
-                );
-                if (attempts >= 3) break;
-                await new Promise((r) => setTimeout(r, 2000));
+                return;
             }
+            await new Promise((resolve) => setTimeout(resolve, 2000));
         }
     }
-    for (const data of chapterMap.values()) {
+
+    // 2. Apply corrections and log results
+    let totalUpdatedHeadings = 0;
+    let modifiedChapters = 0;
+
+    for (const [chapterId, data] of chapterMap.entries()) {
         const $html = cheerio.load(data.html, {
             xmlMode: true,
             decodeEntities: false,
         });
-        let changed = false;
+        let isChanged = false;
+        let chapterChanges = [];
+
         $html(headingSelectors).each((_, el) => {
-            const original = $html(el).text().trim();
-            const corrected = corrections[original] || original;
-            if (original !== corrected) {
-                $html(el).text(corrected);
-                changed = true;
+            const $el = $html(el);
+            const originalHtml = $el.html()?.trim();
+            const correctedHtml = corrections[originalHtml];
+
+            if (correctedHtml && originalHtml !== correctedHtml) {
+                $el.empty().append(correctedHtml);
+                isChanged = true;
+                totalUpdatedHeadings++;
+                chapterChanges.push(
+                    `  [${el.tagName.toUpperCase()}] "${originalHtml}" -> "${correctedHtml}"`,
+                );
             }
         });
-        if (changed) data.html = $html.html();
-    }
-}
 
-async function synchronizeTocHtml(chapterMap, tocId) {
+        if (isChanged) {
+            data.html = $html.xml();
+            modifiedChapters++;
+            console.log(`✅ Chapter [${chapterId}] updated:`);
+            chapterChanges.forEach((log) => console.log(log));
+        }
+    }
+
+    console.log(
+        `\n✨ Standardization Complete: Updated ${totalUpdatedHeadings} headings across ${modifiedChapters} chapters.`,
+    );
+};
+
+const validateAndFixXHTML = (htmlFragment) => {
+    if (!htmlFragment) return "";
+
+    const preFixed = htmlFragment
+        .replace(/<br>(?!\s*<\/br>)/gi, "<br/>")
+        .replace(/<hr>(?!\s*<\/hr>)/gi, "<hr/>")
+        .replace(/<img>(?!\s*<\/img>)/gi, "<img/>");
+
+    try {
+        const $ = cheerio.load(preFixed, {
+            xmlMode: true,
+            decodeEntities: false,
+        });
+        // Use $.xml() to get valid XHTML; trim to avoid extra newlines
+        return $.xml().trim();
+    } catch (e) {
+        console.error("XHTML Fix Failed:", e);
+        return htmlFragment.replace(/<[^>]*>/g, "");
+    }
+};
+
+const getTitleById = ($doc, id) => {
+    if (!id) return null;
+    const $el = $doc(`#${id}`);
+    if ($el.length === 0) return null;
+
+    // 1. 获取当前标签文字
+    let text = $el.text().trim();
+
+    // 2. 如果当前标签没字（如 <a id="ch1"></a>），找其内部或紧随其后的标题
+    if (!text) {
+        const heading = $el.find("h1, h2, h3, h4, h5, h6").first();
+        text =
+            heading.length > 0
+                ? heading.text().trim()
+                : $el.nextAll("h1, h2, h3, h4").first().text().trim();
+    }
+
+    // 3. 如果还是没字，尝试找包含该 ID 的父级标题（如 <h1><span id="x"></span></h1>）
+    if (!text) {
+        text = $el.closest("h1, h2, h3, h4, h5, h6").text().trim();
+    }
+
+    return text;
+};
+
+export const synchronizeTocHtml = async (chapterMap, tocId) => {
     if (!tocId || !chapterMap.has(tocId)) return;
-    console.log("\n🔗 Step 6: Synchronizing HTML TOC...");
+
+    console.log("\n🔗 Step 6: Synchronizing HTML TOC (Smart Anchor)...");
+
     try {
         const tocData = chapterMap.get(tocId);
         const $toc = cheerio.load(tocData.html, {
             xmlMode: true,
             decodeEntities: false,
         });
-        const allChapters = Array.from(chapterMap.values());
+        const allChapters = [...chapterMap.values()];
+
         $toc("a[href]").each((_, el) => {
             const $a = $toc(el);
-            const href = $a.attr("href");
-            const targetChapter = allChapters.find((ch) =>
-                href.includes(path.basename(ch.href)),
+            const rawHref = $a.attr("href");
+            if (!rawHref) return;
+
+            const [fileName, anchor] = rawHref.split("#");
+            const targetChapter = allChapters.find(
+                (ch) => path.basename(ch.href) === fileName,
             );
+
             if (targetChapter && targetChapter.id !== tocId) {
-                const $temp = cheerio.load(targetChapter.html);
-                const translatedTitle = $temp("h1, h2, h3")
-                    .first()
-                    .text()
-                    .trim();
-                if (translatedTitle) $a.text(translatedTitle);
+                const $targetDoc = cheerio.load(targetChapter.html);
+
+                // 优先根据锚点同步，失败则回退至首个标题
+                const title =
+                    getTitleById($targetDoc, anchor) ||
+                    $targetDoc("h1, h2, h3").first().text().trim();
+
+                if (title) $a.text(title);
             }
         });
+
         tocData.html = $toc.html();
     } catch (e) {
-        writeLog("ERROR", `HTML TOC Sync Failed: ${e.stack || e.message}`);
+        console.error(`HTML TOC Sync Failed: ${e.message}`);
     }
-}
+};
 
-async function synchronizeNcx(chapterMap, zipEntries) {
-    console.log("\n🔗 Step 7: Synchronizing NCX Metadata...");
+export const synchronizeNcx = async (chapterMap, zipEntries) => {
+    console.log("\n🔗 Step 7: Synchronizing NCX Metadata (Smart Anchor)...");
+
     try {
         const ncxEntry = zipEntries.find((e) => e.entryName.endsWith(".ncx"));
         if (!ncxEntry) return { ncxEntry: null, ncxContent: "" };
+
         const ncxContent = ncxEntry.getData().toString("utf8");
         const $ncx = cheerio.load(ncxContent, {
             xmlMode: true,
             decodeEntities: false,
         });
-        const headingSelectors = "h1, h2, h3, h4, h5, h6";
-        for (const [id, data] of chapterMap) {
-            const $html = cheerio.load(data.html, {
-                xmlMode: true,
-                decodeEntities: false,
-            });
-            const firstTitle = $html(headingSelectors).first().text().trim();
-            if (firstTitle) {
-                let $nav = $ncx(`navPoint[id="${id}"]`);
-                if ($nav.length === 0) {
-                    const fn = path.basename(data.href);
-                    $nav = $ncx(`navPoint`).filter((_, el) =>
-                        $ncx(el).find("content").attr("src")?.includes(fn),
-                    );
+        const allChapters = [...chapterMap.values()];
+
+        $ncx("navPoint").each((_, el) => {
+            const $navPoint = $ncx(el);
+            const src = $navPoint.find("content").attr("src");
+            if (!src) return;
+
+            const [fileName, anchor] = src.split("#");
+            const targetData = allChapters.find(
+                (ch) => path.basename(ch.href) === fileName,
+            );
+
+            if (targetData) {
+                const $targetDoc = cheerio.load(targetData.html);
+
+                const title =
+                    getTitleById($targetDoc, anchor) ||
+                    $targetDoc("h1, h2, h3, h4").first().text().trim();
+
+                if (title) {
+                    $navPoint.find("navLabel > text").first().text(title);
                 }
-                if ($nav.length > 0)
-                    $nav.find("navLabel > text").first().text(firstTitle);
             }
-        }
+        });
+
         return { ncxEntry, ncxContent: $ncx.xml() };
     } catch (e) {
-        writeLog("ERROR", `NCX Sync Failed: ${e.stack || e.message}`);
+        console.error(`NCX Sync Failed: ${e.message}`);
         return { ncxEntry: null, ncxContent: "" };
     }
-}
+};
 
-async function saveEpub(zip, chapterMap, ncxEntry, ncxContent) {
+const saveEpub = async (zip, chapterMap, ncxEntry, ncxContent) => {
     console.log(`\n💾 Step 8: Finalizing and Saving...`);
     try {
         for (const [id, data] of chapterMap.entries()) {
@@ -687,7 +845,7 @@ async function saveEpub(zip, chapterMap, ncxEntry, ncxContent) {
         writeLog("ERROR", `Save EPUB Failed: ${e.stack || e.message}`);
         throw e;
     }
-}
+};
 
 // =================== 10. 主流程 ===================
 const main = async () => {
@@ -725,7 +883,7 @@ const main = async () => {
             await planTranslationOrder(rawChapters);
 
         // Step 3: 生成术语表
-        const glossary = await generateInitialGlossary(chapterMap);
+        // const glossary = await generateInitialGlossary(chapterMap);
 
         // Step 4: 执行翻译
         await performTranslation(sortedChapters, chapterMap, glossary);
