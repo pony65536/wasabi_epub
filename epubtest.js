@@ -9,10 +9,10 @@ import { fileURLToPath } from "url";
 import Queue from "better-queue";
 import fs from "fs";
 import pkg from "natural";
+
 const { NGrams, WordTokenizer } = pkg;
 
 // =================== 1. ESM 环境兼容设置 ===================
-
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
@@ -32,12 +32,11 @@ const writeLog = (type, content) => {
 };
 
 // =================== 2. 核心设置 ===================
-
 const INPUT_FILE_NAME =
     "The Essays of Warren Buffett Lessons for Corporate America, Fourth Edition (Cunningham, Lawrence A. Buffett, Warren E.) (Z-Library).epub";
 
 const CURRENT_PROVIDER = "mimo";
-const TEST_MODE_LIMIT = 1;
+const TEST_MODE_LIMIT = 2;
 
 const CONFIG = {
     targetLanguage: "Chinese (Simplified)",
@@ -61,7 +60,6 @@ const CONFIG = {
 };
 
 // =================== 3. 翻译风格 ===================
-
 const STYLE_GUIDE = `
 TRANSLATION STYLE GUIDE (Target: Chinese Simplified):
 1. **Rephrase**: Natural Chinese (Xin Da Ya / 信达雅).
@@ -69,12 +67,12 @@ TRANSLATION STYLE GUIDE (Target: Chinese Simplified):
 3. **Tone**: Professional, insightful.
 4. **Vocabulary**: Use appropriate idioms (Chengyu) where natural.
 5. **No Translationese**: Avoid passive voice (e.g., limit usage of "被").
+
 HEADING FORMATTING RULES:
 1. **Consistency**: Table of Contents must match Main Body.
 `;
 
 // =================== 4. AI 初始化与调用 ===================
-
 const fileInfo = path.parse(INPUT_FILE_NAME);
 const activeModelName = CONFIG[CURRENT_PROVIDER].modelName.replace(
     /[\/\\]/g,
@@ -161,7 +159,6 @@ const extractHeading = (htmlContent) => {
 };
 
 // =================== 5. Agent 规划模块 ===================
-
 const planTranslationOrder = async (chapters) => {
     console.log("🕵️ Agent is analyzing book structure...");
 
@@ -245,7 +242,6 @@ OUTPUT: A JSON object:
 };
 
 // =================== 6. 术语表生成模块 ===================
-
 const cleanText = (htmlContent) => {
     const $ = cheerio.load(htmlContent);
     const text = $.text();
@@ -356,23 +352,13 @@ const generateInitialGlossary = async (chapterMap) => {
 };
 
 // =================== 7. 任务队列初始化 ===================
-
 const batchQueue = new Queue(
     async (task, cb) => {
-        const { batch, chapterTitle, $parent, glossary } = task;
+        const { batch, chapterTitle, $parent, processor } = task;
         const MAX_ATTEMPTS = 3;
 
         let attempts = 0;
         let success = false;
-
-        const glossaryMarkdown =
-            glossary && Object.keys(glossary).length > 0
-                ? `\nGLOSSARY (Strictly follow these translations):\n${Object.entries(
-                      glossary,
-                  )
-                      .map(([en, zh]) => `- ${en}: ${zh}`)
-                      .join("\n")}\n`
-                : "";
 
         while (!success && attempts < MAX_ATTEMPTS) {
             try {
@@ -399,20 +385,11 @@ const batchQueue = new Queue(
                     })
                     .join("\n");
 
-                const prompt = `
-TASK: Translate the content of each <node> into ${CONFIG.targetLanguage}.
-
-CONTEXT: Book Chapter "${chapterTitle}".
-Use glossary information when translating.
-${glossaryMarkdown}
-${STYLE_GUIDE}
-
-🛑 RULES:
-1. Return each node as: <node id="node_x">translated text</node>
-2. Keep inline tags (<a>, <strong>, </node> etc.) intact.
-                `;
-
-                const rawResponse = await callAI(batchInput, prompt, false);
+                const rawResponse = await callAI(
+                    batchInput,
+                    processor.prompt,
+                    false,
+                );
 
                 for (const node of batch) {
                     const nodeRegex = new RegExp(
@@ -421,13 +398,13 @@ ${STYLE_GUIDE}
                     );
                     const match = rawResponse.match(nodeRegex);
                     if (match && match[1]) {
-                        const translatedContent = match[1].trim();
+                        const processedContent = match[1].trim();
 
                         try {
-                            cheerio.load(translatedContent, { xmlMode: true });
-                            $parent(`[data-t-id="${node.id}"]`)
-                                .html(translatedContent)
-                                .removeAttr("data-t-id");
+                            cheerio.load(processedContent, { xmlMode: true });
+                            $parent(`[${processor.attrName}="${node.id}"]`)
+                                .html(processedContent)
+                                .removeAttr(processor.attrName);
                         } catch (xmlError) {
                             writeLog(
                                 "ERROR",
@@ -452,7 +429,99 @@ ${STYLE_GUIDE}
     { concurrent: CONFIG[CURRENT_PROVIDER].concurrency, maxRetries: 0 },
 );
 
-// =================== 8. 翻译 HTML 内容 ===================
+// =================== 8. 处理 HTML 内容 (通用批处理逻辑) ===================
+const processHtmlBatch = async ($, nodeList, chapterTitle, processor) => {
+    if (nodeList.length === 0) return;
+
+    const BATCH_SIZE_LIMIT = 5000;
+    const batches = [];
+    let currentBatch = [];
+    let currentLength = 0;
+
+    for (const node of nodeList) {
+        if (
+            currentLength + node.content.length > BATCH_SIZE_LIMIT &&
+            currentBatch.length > 0
+        ) {
+            batches.push(currentBatch);
+            currentBatch = [];
+            currentLength = 0;
+        }
+        currentBatch.push(node);
+        currentLength += node.content.length;
+    }
+    if (currentBatch.length > 0) batches.push(currentBatch);
+
+    const promises = batches.map((batch) => {
+        return new Promise((resolve) => {
+            batchQueue
+                .push({
+                    batch,
+                    chapterTitle,
+                    $parent: $,
+                    processor,
+                })
+                .on("finish", () => resolve())
+                .on("failed", (err) => {
+                    writeLog("ERROR", `Batch Task Failed: ${err?.message}`);
+                    resolve();
+                });
+        });
+    });
+    await Promise.all(promises);
+
+    // 失败重试逻辑
+    let retryRound = 1;
+    const MAX_RETRY_ROUNDS = 3;
+    const attrName = processor.attrName;
+
+    while (retryRound <= MAX_RETRY_ROUNDS) {
+        const failedNodes = [];
+        $(`[${attrName}]`).each((_, el) => {
+            failedNodes.push({
+                id: $(el).attr(attrName),
+                content: $(el).html(),
+            });
+        });
+
+        if (failedNodes.length === 0) break;
+
+        console.log(
+            `    - ⚠️ Retrying ${failedNodes.length} failed nodes (Round ${retryRound}/${MAX_RETRY_ROUNDS})...`,
+        );
+
+        const retryBatches = [];
+        let rb = [];
+        let rl = 0;
+        for (const n of failedNodes) {
+            if (rl + n.content.length > BATCH_SIZE_LIMIT && rb.length > 0) {
+                retryBatches.push(rb);
+                rb = [];
+                rl = 0;
+            }
+            rb.push(n);
+            rl += n.content.length;
+        }
+        if (rb.length > 0) retryBatches.push(rb);
+
+        const retryPromises = retryBatches.map((batch) => {
+            return new Promise((resolve) => {
+                batchQueue
+                    .push({
+                        batch,
+                        chapterTitle,
+                        $parent: $,
+                        processor,
+                    })
+                    .on("finish", () => resolve())
+                    .on("failed", () => resolve());
+            });
+        });
+        await Promise.all(retryPromises);
+        retryRound++;
+    }
+};
+
 const translateHtmlContent = async (htmlContent, chapterTitle, glossary) => {
     const $ = cheerio.load(htmlContent, {
         xmlMode: true,
@@ -469,76 +538,42 @@ const translateHtmlContent = async (htmlContent, chapterTitle, glossary) => {
         }
     });
 
-    if (nodesToTranslate.length === 0) return $.html();
-    const BATCH_SIZE_LIMIT = 5000;
+    const glossaryMarkdown =
+        glossary && Object.keys(glossary).length > 0
+            ? `\nGLOSSARY (Strictly follow these translations):\n${Object.entries(
+                  glossary,
+              )
+                  .map(([en, zh]) => `- ${en}: ${zh}`)
+                  .join("\n")}\n`
+            : "";
 
-    const processInBatches = async (nodeList) => {
-        const batches = [];
-        let currentBatch = [];
-        let currentLength = 0;
-        for (const node of nodeList) {
-            if (
-                currentLength + node.content.length > BATCH_SIZE_LIMIT &&
-                currentBatch.length > 0
-            ) {
-                batches.push(currentBatch);
-                currentBatch = [];
-                currentLength = 0;
-            }
-            currentBatch.push(node);
-            currentLength += node.content.length;
-        }
-        if (currentBatch.length > 0) batches.push(currentBatch);
+    const translationProcessor = {
+        attrName: "data-t-id",
+        prompt: `
+TASK: Translate the content of each <node> into ${CONFIG.targetLanguage}.
 
-        const promises = batches.map((batch) => {
-            return new Promise((resolve) => {
-                batchQueue
-                    .push({ batch, chapterTitle, $parent: $, glossary })
-                    .on("finish", () => resolve())
-                    .on("failed", (err) => {
-                        writeLog("ERROR", `Batch Task Failed: ${err?.message}`);
-                        resolve();
-                    });
-            });
-        });
-        await Promise.all(promises);
+CONTEXT: Book Chapter "${chapterTitle}".
+Use glossary information when translating.
+${glossaryMarkdown}
+${STYLE_GUIDE}
+
+🛑 RULES:
+1. Return each node as: <node id="node_x">translated text</node>
+2. Keep inline tags (<a>, <strong>, </node> etc.) intact.
+                `,
     };
 
-    await processInBatches(nodesToTranslate);
-
-    let retryRound = 1;
-    const MAX_RETRY_ROUNDS = 3;
-
-    while (retryRound <= MAX_RETRY_ROUNDS) {
-        const failedNodes = [];
-        $("[data-t-id]").each((_, el) => {
-            failedNodes.push({
-                id: $(el).attr("data-t-id"),
-                content: $(el).html(),
-            });
-        });
-
-        if (failedNodes.length === 0) break;
-
-        console.log(
-            `    - ⚠️ Retrying ${failedNodes.length} invalid XHTML nodes (Round ${retryRound}/${MAX_RETRY_ROUNDS})...`,
-        );
-
-        writeLog(
-            "RETRY_INFO",
-            `Round ${retryRound} - Retrying nodes:\n${failedNodes.map((n) => `ID: ${n.id} | Content: ${n.content.substring(0, 100)}...`).join("\n")}`,
-        );
-
-        await processInBatches(failedNodes);
-        retryRound++;
-    }
-
+    await processHtmlBatch(
+        $,
+        nodesToTranslate,
+        chapterTitle,
+        translationProcessor,
+    );
     $("[data-t-id]").removeAttr("data-t-id");
     return $.html();
 };
 
 // =================== 9. 核心步骤函数 ===================
-
 const performTranslation = async (sortedChapters, chapterMap, glossary) => {
     console.log("\n✍️ Step 4: Translating Book Content...");
     const chaptersToProcess = sortedChapters.slice(
@@ -569,154 +604,130 @@ const performTranslation = async (sortedChapters, chapterMap, glossary) => {
 };
 
 const standardizeHeadingFormats = async (chapterMap) => {
-    console.log("\n🧐 Step 5: Standardizing Heading Formats...");
+    console.log(
+        "\n🧐 Step 5: Global Heading Standardization (Ensuring Cross-Chapter Consistency)...",
+    );
 
+    const allHeadings = [];
     const headingSelectors = "h1, h2, h3, h4, h5, h6";
-    const uniqueHeadings = new Set();
 
-    // 1. Extract original HTML fragments
-    for (const { html } of chapterMap.values()) {
-        const $temp = cheerio.load(html, {
-            xmlMode: true,
-            decodeEntities: false,
-        });
-        $temp(headingSelectors).each((_, el) => {
-            const htmlContent = $temp(el).html()?.trim();
-            if (htmlContent) uniqueHeadings.add(htmlContent);
-        });
-    }
-
-    if (uniqueHeadings.size === 0) {
-        console.log("ℹ️ No headings found to process.");
-        return;
-    }
-
-    let corrections = {};
-    const prompt = `Role: XHTML Copy Editor. Task: STANDARDIZE HEADING FORMATS ONLY.
-
-STRICT CONSTRAINTS:
-
-    NO translation, paraphrasing, or rewriting. Original text must be preserved character-for-character.
-
-    Only modify: Structural markers (numbering/prefixes) and Hierarchy consistency.
-
-    Whitespace Normalization:
-
-        REMOVE: Leading/trailing spaces, \t, \n, \r, and repeated spaces.
-
-        KEEP: Single spaces between English words or meaningful title spacing.
-
-    XHTML: Use self-closing tags (e.g.,
-
-    ).
-
-TASK RULES:
-
-    Unify style for same-level headings (e.g., consistency in "Chapter X" vs "Chapter X").
-
-    Do NOT introduce new language styles or translate (e.g., keep English as English).
-Example:
-Input:
-["old_title_1", "old_title_2", "old_title_3"]
-
-Output:
-{
-  "old_title_1": "new_title_1",
-  "old_title_2": "new_title_2",
-  "old_title_3": "new_title_3"
-}
-`;
-
-    for (let attempts = 1; attempts <= 3; attempts++) {
-        try {
-            const responseText = await callAI(
-                JSON.stringify([...uniqueHeadings]),
-                prompt,
-                true,
-            );
-
-            const cleanJson = JSON.parse(
-                responseText.replace(/```json|```/g, "").trim(),
-            );
-
-            corrections = Object.entries(cleanJson).reduce(
-                (acc, [key, value]) => {
-                    acc[key] = validateAndFixXHTML(value);
-                    return acc;
-                },
-                {},
-            );
-
-            break;
-        } catch (error) {
-            writeLog("ERROR", `Attempt ${attempts} failed: ${error.message}`);
-            if (attempts === 3) {
-                console.log(
-                    "❌ Failed to get AI corrections after 3 attempts.",
-                );
-                return;
-            }
-            await new Promise((resolve) => setTimeout(resolve, 2000));
-        }
-    }
-
-    // 2. Apply corrections and log results
-    let totalUpdatedHeadings = 0;
-    let modifiedChapters = 0;
-
+    // 1. 全局提取所有标题，并注入临时的全局唯一 ID
     for (const [chapterId, data] of chapterMap.entries()) {
-        const $html = cheerio.load(data.html, {
+        const $ = cheerio.load(data.html, {
             xmlMode: true,
             decodeEntities: false,
         });
-        let isChanged = false;
-        let chapterChanges = [];
-
-        $html(headingSelectors).each((_, el) => {
-            const $el = $html(el);
-            const originalHtml = $el.html()?.trim();
-            const correctedHtml = corrections[originalHtml];
-
-            if (correctedHtml && originalHtml !== correctedHtml) {
-                $el.empty().append(correctedHtml);
-                isChanged = true;
-                totalUpdatedHeadings++;
-                chapterChanges.push(
-                    `  [${el.tagName.toUpperCase()}] "${originalHtml}" -> "${correctedHtml}"`,
-                );
+        $(headingSelectors).each((i, el) => {
+            const $el = $(el);
+            const content = $el.html()?.trim();
+            if (content) {
+                const globalNodeId = `gh_${chapterId}_${i}`;
+                $el.attr("data-gh-id", globalNodeId);
+                allHeadings.push({
+                    id: globalNodeId,
+                    content,
+                    chapterId,
+                    level: el.tagName, // 记录 h1, h2 等级别，帮助 AI 判断
+                });
+                data.html = $.xml(); // 更新内存中的 HTML 结构以保留 data-gh-id
             }
         });
-
-        if (isChanged) {
-            data.html = $html.xml();
-            modifiedChapters++;
-            console.log(`✅ Chapter [${chapterId}] updated:`);
-            chapterChanges.forEach((log) => console.log(log));
-        }
     }
+
+    if (allHeadings.length === 0) return;
+
+    // 2. 准备全局标准化 Processor
+    const globalStandardizeProcessor = {
+        attrName: "data-gh-id",
+        // TODO: 修改prompt以保留a标签和sup标签
+        prompt: `Role: XHTML Copy Editor Task: Standardize heading formats based on hierarchical semantics.
+
+Core Rules:
+
+    Structural Uniformity: Identify the dominant pattern for each hierarchy level (e.g., "1.1", "1.1.", or "Chapter I"). Force-apply this pattern to all nodes of the same level.
+
+    Zero Content Edit: Do NOT translate, rephrase, or fix grammar. Preserve all original words exactly.
+
+    Whitespace: Trim edges; collapse internal spaces to a single space; remove all '
+' or '	'.
+
+    Consistency: Ensure markers (dots, brackets, dashes) are identical across the same level. Do NOT create new levels.
+
+Output Format (Strict): <node id="node_x">standardized heading</node> (No explanations, no extra text.)`,
+    };
+
+    // 3. 使用一个临时的虚拟 $ 对象进行批处理回填
+    // 注意：这里我们创建一个巨大的虚拟容器来处理，或者直接在 processHtmlBatch 逻辑上微调
+    // 为了简单且不破坏原有 processHtmlBatch 逻辑，我们这里手动分批调用 AI
 
     console.log(
-        `\n✨ Standardization Complete: Updated ${totalUpdatedHeadings} headings across ${modifiedChapters} chapters.`,
+        `  - Standardizing ${allHeadings.length} headings across all chapters...`,
     );
+
+    const BATCH_SIZE = 30; // 标题比较短，可以稍微多放几个，但为了逻辑严密，每批 30 个
+    for (let i = 0; i < allHeadings.length; i += BATCH_SIZE) {
+        const batch = allHeadings.slice(i, i + BATCH_SIZE);
+        const batchInput = batch
+            .map(
+                (h) =>
+                    `<node id="${h.id}" level="${h.level}">${h.content}</node>`,
+            )
+            .join("\n");
+
+        const rawResponse = await callAI(
+            batchInput,
+            globalStandardizeProcessor.prompt,
+            false,
+        );
+
+        // 解析并回填到对应的章节 HTML 中
+        for (const item of batch) {
+            const nodeRegex = new RegExp(
+                `<node id="${item.id}">([\\s\\S]*?)<\/node>`,
+                "i",
+            );
+            const match = rawResponse.match(nodeRegex);
+            if (match && match[1]) {
+                const standardizedContent = match[1].trim();
+                const data = chapterMap.get(item.chapterId);
+                const $ = cheerio.load(data.html, {
+                    xmlMode: true,
+                    decodeEntities: false,
+                });
+                $(`[data-gh-id="${item.id}"]`)
+                    .html(standardizedContent)
+                    .removeAttr("data-gh-id");
+                data.html = $.xml();
+            }
+        }
+    }
+
+    // 4. 清理残留标签（防御性代码）
+    for (const data of chapterMap.values()) {
+        const $ = cheerio.load(data.html, {
+            xmlMode: true,
+            decodeEntities: false,
+        });
+        $("[data-gh-id]").removeAttr("data-gh-id");
+        data.html = $.xml();
+    }
+
+    console.log(`\n✨ Global Standardization Complete.`);
 };
 
 const validateAndFixXHTML = (htmlFragment) => {
     if (!htmlFragment) return "";
-
     const preFixed = htmlFragment
         .replace(/<br>(?!\s*<\/br>)/gi, "<br/>")
         .replace(/<hr>(?!\s*<\/hr>)/gi, "<hr/>")
         .replace(/<img>(?!\s*<\/img>)/gi, "<img/>");
-
     try {
         const $ = cheerio.load(preFixed, {
             xmlMode: true,
             decodeEntities: false,
         });
-        // Use $.xml() to get valid XHTML; trim to avoid extra newlines
         return $.xml().trim();
     } catch (e) {
-        console.error("XHTML Fix Failed:", e);
         return htmlFragment.replace(/<[^>]*>/g, "");
     }
 };
@@ -725,11 +736,7 @@ const getTitleById = ($doc, id) => {
     if (!id) return null;
     const $el = $doc(`#${id}`);
     if ($el.length === 0) return null;
-
-    // 1. 获取当前标签文字
     let text = $el.text().trim();
-
-    // 2. 如果当前标签没字（如 <a id="ch1"></a>），找其内部或紧随其后的标题
     if (!text) {
         const heading = $el.find("h1, h2, h3, h4, h5, h6").first();
         text =
@@ -737,20 +744,13 @@ const getTitleById = ($doc, id) => {
                 ? heading.text().trim()
                 : $el.nextAll("h1, h2, h3, h4").first().text().trim();
     }
-
-    // 3. 如果还是没字，尝试找包含该 ID 的父级标题（如 <h1><span id="x"></span></h1>）
-    if (!text) {
-        text = $el.closest("h1, h2, h3, h4, h5, h6").text().trim();
-    }
-
+    if (!text) text = $el.closest("h1, h2, h3, h4, h5, h6").text().trim();
     return text;
 };
 
 export const synchronizeTocHtml = async (chapterMap, tocId) => {
     if (!tocId || !chapterMap.has(tocId)) return;
-
     console.log("\n🔗 Step 6: Synchronizing HTML TOC (Smart Anchor)...");
-
     try {
         const tocData = chapterMap.get(tocId);
         const $toc = cheerio.load(tocData.html, {
@@ -758,29 +758,22 @@ export const synchronizeTocHtml = async (chapterMap, tocId) => {
             decodeEntities: false,
         });
         const allChapters = [...chapterMap.values()];
-
         $toc("a[href]").each((_, el) => {
             const $a = $toc(el);
             const rawHref = $a.attr("href");
             if (!rawHref) return;
-
             const [fileName, anchor] = rawHref.split("#");
             const targetChapter = allChapters.find(
                 (ch) => path.basename(ch.href) === fileName,
             );
-
             if (targetChapter && targetChapter.id !== tocId) {
                 const $targetDoc = cheerio.load(targetChapter.html);
-
-                // 优先根据锚点同步，失败则回退至首个标题
                 const title =
                     getTitleById($targetDoc, anchor) ||
                     $targetDoc("h1, h2, h3").first().text().trim();
-
                 if (title) $a.text(title);
             }
         });
-
         tocData.html = $toc.html();
     } catch (e) {
         console.error(`HTML TOC Sync Failed: ${e.message}`);
@@ -789,41 +782,32 @@ export const synchronizeTocHtml = async (chapterMap, tocId) => {
 
 export const synchronizeNcx = async (chapterMap, zipEntries) => {
     console.log("\n🔗 Step 7: Synchronizing NCX Metadata (Smart Anchor)...");
-
     try {
         const ncxEntry = zipEntries.find((e) => e.entryName.endsWith(".ncx"));
         if (!ncxEntry) return { ncxEntry: null, ncxContent: "" };
-
         const ncxContent = ncxEntry.getData().toString("utf8");
         const $ncx = cheerio.load(ncxContent, {
             xmlMode: true,
             decodeEntities: false,
         });
         const allChapters = [...chapterMap.values()];
-
         $ncx("navPoint").each((_, el) => {
             const $navPoint = $ncx(el);
             const src = $navPoint.find("content").attr("src");
             if (!src) return;
-
             const [fileName, anchor] = src.split("#");
             const targetData = allChapters.find(
                 (ch) => path.basename(ch.href) === fileName,
             );
-
             if (targetData) {
                 const $targetDoc = cheerio.load(targetData.html);
-
                 const title =
                     getTitleById($targetDoc, anchor) ||
                     $targetDoc("h1, h2, h3, h4").first().text().trim();
-
-                if (title) {
+                if (title)
                     $navPoint.find("navLabel > text").first().text(title);
-                }
             }
         });
-
         return { ncxEntry, ncxContent: $ncx.xml() };
     } catch (e) {
         console.error(`NCX Sync Failed: ${e.message}`);
@@ -847,20 +831,21 @@ const saveEpub = async (zip, chapterMap, ncxEntry, ncxContent) => {
     }
 };
 
-// =================== 10. 主流程 ===================
+// =================== 10. 主函数 ===================
 const main = async () => {
     initClient();
     console.log(`\n========================================`);
     console.log(`📖 Input: ${path.basename(inputPath)}`);
     console.log(`========================================\n`);
+
     try {
-        // Step 1: 读取 EPUB 内容
-        console.log("📖 Step 1: Reading EPUB Content...");
         const zip = new AdmZip(inputPath);
         const epub = await EPub.createAsync(inputPath);
         const zipEntries = zip.getEntries();
         const chapterMap = new Map();
-        const rawChapters = epub.flow.map((chapter) => {
+
+        // 基础数据加载
+        epub.flow.forEach((chapter) => {
             const zipEntry = zipEntries.find((e) =>
                 decodeURIComponent(e.entryName).endsWith(
                     decodeURIComponent(chapter.href),
@@ -874,34 +859,40 @@ const main = async () => {
                 title: chapter.title || extractHeading(html) || "Untitled",
             };
             if (data.entryName) chapterMap.set(data.id, data);
-            return data;
         });
 
-        // Step 2: 制定翻译计划
-        console.log("📖 Step 2: Planning Translation Order...");
-        const { sorted: sortedChapters, tocId } =
-            await planTranslationOrder(rawChapters);
+        // 1. 规划顺序
+        let plan = { sorted: [...chapterMap.values()], tocId: null };
+        try {
+            plan = await planTranslationOrder([...chapterMap.values()]);
+        } catch (e) {
+            console.warn(
+                "⚠️ Plan order step skipped or failed, using default order.",
+            );
+        }
 
-        // Step 3: 生成术语表
-        // const glossary = await generateInitialGlossary(chapterMap);
+        // 2. 执行翻译
+        await performTranslation(plan.sorted, chapterMap, {});
 
-        // Step 4: 执行翻译
-        await performTranslation(sortedChapters, chapterMap, glossary);
-
-        // Step 5: 标题标准化
+        // 3. 全局标题标准化 (重写后的核心部分)
         await standardizeHeadingFormats(chapterMap);
 
-        // Step 6: 同步 HTML 目录
-        await synchronizeTocHtml(chapterMap, tocId);
+        // 4. 同步 HTML 目录
+        await synchronizeTocHtml(chapterMap, plan.tocId);
 
-        // Step 7: 同步 NCX 元数据
+        // 5. 同步 NCX
         const { ncxEntry, ncxContent } = await synchronizeNcx(
             chapterMap,
             zipEntries,
         );
 
-        // Step 8: 保存文件
-        await saveEpub(zip, chapterMap, ncxEntry, ncxContent);
+        // 6. 保存文件
+        await saveEpub(
+            zip,
+            chapterMap,
+            typeof ncxEntry !== "undefined" ? ncxEntry : null,
+            typeof ncxContent !== "undefined" ? ncxContent : null,
+        );
     } catch (e) {
         writeLog("ERROR", `Main Process Fatal Error: ${e.stack || e.message}`);
         console.error("Fatal error occurred. Check logs for details.");
