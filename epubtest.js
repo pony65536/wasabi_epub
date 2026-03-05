@@ -36,7 +36,7 @@ const INPUT_FILE_NAME =
     "The Essays of Warren Buffett Lessons for Corporate America, Fourth Edition (Cunningham, Lawrence A. Buffett, Warren E.) (Z-Library).epub";
 
 const CURRENT_PROVIDER = "mimo";
-const TEST_MODE_LIMIT = 2;
+const TEST_MODE_LIMIT = 0;
 
 const CONFIG = {
     targetLanguage: "Chinese (Simplified)",
@@ -608,10 +608,10 @@ const standardizeHeadingFormats = async (chapterMap) => {
         "\n🧐 Step 5: Global Heading Standardization (Ensuring Cross-Chapter Consistency)...",
     );
 
-    const allHeadings = [];
     const headingSelectors = "h1, h2, h3, h4, h5, h6";
 
-    // 1. 全局提取所有标题，并注入临时的全局唯一 ID
+    // 1. 全局提取所有标题，注入临时的全局唯一 ID
+    const allHeadings = [];
     for (const [chapterId, data] of chapterMap.entries()) {
         const $ = cheerio.load(data.html, {
             xmlMode: true,
@@ -627,109 +627,132 @@ const standardizeHeadingFormats = async (chapterMap) => {
                     id: globalNodeId,
                     content,
                     chapterId,
-                    level: el.tagName, // 记录 h1, h2 等级别，帮助 AI 判断
+                    level: el.tagName,
                 });
-                data.html = $.xml(); // 更新内存中的 HTML 结构以保留 data-gh-id
             }
         });
+        data.html = $.xml();
     }
 
-    if (allHeadings.length === 0) return;
-
-    // 2. 准备全局标准化 Processor
-    const globalStandardizeProcessor = {
-        attrName: "data-gh-id",
-        // TODO: 修改prompt以保留a标签和sup标签
-        prompt: `Role: XHTML Copy Editor Task: Standardize heading formats based on hierarchical semantics.
-
-Core Rules:
-
-    Structural Uniformity: Identify the dominant pattern for each hierarchy level (e.g., "1.1", "1.1.", or "Chapter I"). Force-apply this pattern to all nodes of the same level.
-
-    Zero Content Edit: Do NOT translate, rephrase, or fix grammar. Preserve all original words exactly.
-
-    Whitespace: Trim edges; collapse internal spaces to a single space; remove all '
-' or '	'.
-
-    Consistency: Ensure markers (dots, brackets, dashes) are identical across the same level. Do NOT create new levels.
-
-Output Format (Strict): <node id="node_x">standardized heading</node> (No explanations, no extra text.)`,
-    };
-
-    // 3. 使用一个临时的虚拟 $ 对象进行批处理回填
-    // 注意：这里我们创建一个巨大的虚拟容器来处理，或者直接在 processHtmlBatch 逻辑上微调
-    // 为了简单且不破坏原有 processHtmlBatch 逻辑，我们这里手动分批调用 AI
+    if (allHeadings.length === 0) {
+        console.log(`\n✨ No headings found, skipping standardization.`);
+        return;
+    }
 
     console.log(
-        `  - Standardizing ${allHeadings.length} headings across all chapters...`,
+        `  - Found ${allHeadings.length} headings across all chapters.`,
     );
 
-    const BATCH_SIZE = 30; // 标题比较短，可以稍微多放几个，但为了逻辑严密，每批 30 个
-    for (let i = 0; i < allHeadings.length; i += BATCH_SIZE) {
-        const batch = allHeadings.slice(i, i + BATCH_SIZE);
-        const batchInput = batch
-            .map(
-                (h) =>
-                    `<node id="${h.id}" level="${h.level}">${h.content}</node>`,
-            )
-            .join("\n");
+    // 2. 把全部标题发给 AI，让它分析并确定各级标题的标准化格式规则
+    const analyzePrompt = `Role: XHTML Heading Format Analyst.
 
-        const rawResponse = await callAI(
-            batchInput,
-            globalStandardizeProcessor.prompt,
-            false,
+Task: Analyze the provided list of headings from an EPUB book and determine the standardized format pattern for each heading level (h1, h2, h3, etc.).
+
+Input: A JSON array of heading objects with fields: id, content, level.
+
+Output: A JSON object mapping each heading level to its dominant/correct format pattern description.
+Example output:
+{
+  "h1": "Plain title text, no numbering prefix",
+  "h2": "Numbered with format '1. Title'",
+  "h3": "Numbered with format '1.1 Title'"
+}
+
+Rules:
+- Analyze ALL headings of each level and identify the dominant pattern.
+- Describe the pattern concisely so it can be applied as a formatting instruction.
+- Output only the JSON object, no extra explanation.`;
+
+    let formatRules = {};
+    try {
+        const analyzeInput = JSON.stringify(
+            allHeadings.map((h) => ({
+                id: h.id,
+                content: h.content,
+                level: h.level,
+            })),
         );
-
-        // 解析并回填到对应的章节 HTML 中
-        for (const item of batch) {
-            const nodeRegex = new RegExp(
-                `<node id="${item.id}">([\\s\\S]*?)<\/node>`,
-                "i",
-            );
-            const match = rawResponse.match(nodeRegex);
-            if (match && match[1]) {
-                const standardizedContent = match[1].trim();
-                const data = chapterMap.get(item.chapterId);
-                const $ = cheerio.load(data.html, {
-                    xmlMode: true,
-                    decodeEntities: false,
-                });
-                $(`[data-gh-id="${item.id}"]`)
-                    .html(standardizedContent)
-                    .removeAttr("data-gh-id");
-                data.html = $.xml();
-            }
+        const analyzeResponse = await callAI(analyzeInput, analyzePrompt, true);
+        formatRules = JSON.parse(
+            analyzeResponse.replace(/```json|```/g, "").trim(),
+        );
+        console.log(
+            "  - ✅ Format rules determined:",
+            JSON.stringify(formatRules),
+        );
+        writeLog("HEADING_FORMAT_RULES", JSON.stringify(formatRules, null, 2));
+    } catch (e) {
+        writeLog(
+            "ERROR",
+            `Heading format analysis failed: ${e.stack || e.message}`,
+        );
+        console.warn(
+            "  - ⚠️ Could not determine format rules, skipping standardization.",
+        );
+        // 清理残留标签
+        for (const data of chapterMap.values()) {
+            const $ = cheerio.load(data.html, {
+                xmlMode: true,
+                decodeEntities: false,
+            });
+            $("[data-gh-id]").removeAttr("data-gh-id");
+            data.html = $.xml();
         }
+        return;
     }
 
-    // 4. 清理残留标签（防御性代码）
-    for (const data of chapterMap.values()) {
+    // 3. 构建标准化 Processor，将格式规则注入 prompt
+    const formatRulesText = Object.entries(formatRules)
+        .map(([level, rule]) => `- ${level}: ${rule}`)
+        .join("\n");
+
+    const standardizeProcessor = {
+        attrName: "data-gh-id",
+        prompt: `Role: XHTML Copy Editor.
+Task: Standardize heading formats according to the format rules below.
+
+FORMAT RULES (apply strictly per heading level):
+${formatRulesText}
+
+🛑 RULES:
+1. Return each node as: <node id="gh_x">standardized heading content</node>
+2. Keep inline tags (<a>, <strong>, <em>, <sup>, <span> etc.) intact.
+3. Do NOT translate or rephrase any text content.
+4. Only adjust numbering prefixes, punctuation markers, or whitespace to match the format rule for that heading's level.
+5. Trim edges; collapse internal spaces to a single space; remove all newlines or tabs.`,
+    };
+
+    // 4. 为每个章节的标题节点分别执行批处理（复用 processHtmlBatch）
+    //    按章节分组，每章内标题共享同一个 cheerio 实例，方便回填
+    const chapterHeadingMap = new Map();
+    for (const h of allHeadings) {
+        if (!chapterHeadingMap.has(h.chapterId)) {
+            chapterHeadingMap.set(h.chapterId, []);
+        }
+        chapterHeadingMap
+            .get(h.chapterId)
+            .push({ id: h.id, content: h.content });
+    }
+
+    let processedChapters = 0;
+    for (const [chapterId, nodes] of chapterHeadingMap.entries()) {
+        const data = chapterMap.get(chapterId);
         const $ = cheerio.load(data.html, {
             xmlMode: true,
             decodeEntities: false,
         });
+
+        await processHtmlBatch($, nodes, chapterId, standardizeProcessor);
+
+        // 清理残留未处理的 data-gh-id（防御性）
         $("[data-gh-id]").removeAttr("data-gh-id");
         data.html = $.xml();
+        processedChapters++;
     }
 
-    console.log(`\n✨ Global Standardization Complete.`);
-};
-
-const validateAndFixXHTML = (htmlFragment) => {
-    if (!htmlFragment) return "";
-    const preFixed = htmlFragment
-        .replace(/<br>(?!\s*<\/br>)/gi, "<br/>")
-        .replace(/<hr>(?!\s*<\/hr>)/gi, "<hr/>")
-        .replace(/<img>(?!\s*<\/img>)/gi, "<img/>");
-    try {
-        const $ = cheerio.load(preFixed, {
-            xmlMode: true,
-            decodeEntities: false,
-        });
-        return $.xml().trim();
-    } catch (e) {
-        return htmlFragment.replace(/<[^>]*>/g, "");
-    }
+    console.log(
+        `\n✨ Global Standardization Complete. (${processedChapters} chapters processed)`,
+    );
 };
 
 const getTitleById = ($doc, id) => {
