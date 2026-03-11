@@ -1,24 +1,38 @@
 {
-    "main": "bot.js",
-    "type": "module",
-    "dependencies": {
-        "@google/generative-ai": "^0.24.1",
-        "adm-zip": "^0.5.16",
-        "async-mutex": "^0.5.0",
-        "better-queue": "^3.8.12",
-        "cheerio": "^1.2.0",
-        "dotenv": "^17.2.3",
-        "epub2": "^3.0.2",
-        "grammy": "^1.38.4",
-        "jieba-wasm": "^2.4.0",
-        "natural": "^8.1.0",
-        "node-epub": "^1.0.0-beta.5",
-        "node-fetch": "^3.3.2",
-        "nodepub": "^3.2.1",
-        "openai": "^6.14.0",
-        "p-limit": "^7.2.0"
-    },
-    "devDependencies": {
-        "typescript": "^5.9.3"
-    }
+  "name": "wasabi-epub",
+  "version": "1.0.0",
+  "description": "Translate EPUB books using AI",
+  "main": "dist/cli.js",
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "start": "npm run build && node dist/cli.js",
+    "dev": "tsc && node dist/cli.js",
+    "clean": "rm -rf dist cache logs"
+  },
+  "dependencies": {
+    "@google/generative-ai": "^0.24.1",
+    "adm-zip": "^0.5.16",
+    "async-mutex": "^0.5.0",
+    "better-queue": "^3.8.12",
+    "cheerio": "^1",
+    "dot.2.0env": "^17.2.3",
+    "epub2": "^3.0.2",
+    "grammy": "^1.38.4",
+    "jieba-wasm": "^2.4.0",
+    "natural": "^8.1.0",
+    "node-epub": "^1.0.0-beta.5",
+    "node-fetch": "^3.3.2",
+    "nodepub": "^3.2.1",
+    "openai": "^6.14.0",
+    "p-limit": "^7.2.0"
+  },
+  "devDependencies": {
+    "@types/better-queue": "^3.8.6",
+    "@types/cheerio": "^0.22.35",
+    "typescript": "^5.9.3"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
 }
