@@ -18,14 +18,14 @@ const __dirname = path.dirname(__filename);
 
 // =================== 2. 核心设置 ===================
 const INPUT_FILE_NAME =
-    // "The Essays of Warren Buffett Lessons for Corporate America, Fourth Edition (Cunningham, Lawrence A. Buffett, Warren E.) (Z-Library).epub";
-    // "One from Many VISA and the Rise of Chaordic Organization (VISA InternationalHock, Dee) (Z-Library).epub";
-    "The Wealth of Nations (Adam Smith) (z-library.sk, 1lib.sk, z-lib.sk).epub";
+    "The Essays of Warren Buffett Lessons for Corporate America, Fourth Edition (Cunningham, Lawrence A. Buffett, Warren E.) (Z-Library).epub";
+// "One from Many VISA and the Rise of Chaordic Organization (VISA InternationalHock, Dee) (Z-Library).epub";
+// "The Wealth of Nations (Adam Smith) (z-library.sk, 1lib.sk, z-lib.sk).epub";
 
 const CURRENT_PROVIDER = "qwen";
 
 // 测试模式：null 表示翻译全部章节，数字表示只翻译前 N 章
-const TEST_MODE_LIMIT = 2;
+const TEST_MODE_LIMIT = null;
 
 const CONFIG = {
     targetLanguage: "Chinese (Simplified)",
@@ -379,25 +379,6 @@ const extractFirstHeading = (htmlContent) => {
     return titleTag ? titleTag.trim() : null;
 };
 
-// const resolveAnchorTitle = ($doc, anchor) => {
-//     if (anchor) {
-//         const $el = $doc(`#${anchor}`);
-//         if ($el.length > 0) {
-//             let text = $el.text().trim();
-//             if (!text) {
-//                 const heading = $el.find("h1, h2, h3, h4, h5, h6").first();
-//                 text =
-//                     heading.length > 0
-//                         ? heading.text().trim()
-//                         : $el.nextAll("h1, h2, h3, h4").first().text().trim();
-//             }
-//             if (!text)
-//                 text = $el.closest("h1, h2, h3, h4, h5, h6").text().trim();
-//             if (text) return text;
-//         }
-//     }
-//     return $doc("h1, h2, h3").first().text().trim() || null;
-// };
 const resolveAnchorTitle = ($doc, anchor) => {
     const cleanText = ($el) => {
         if (!$el || !$el.length) return "";
@@ -643,7 +624,7 @@ ${rulesDescription}
 
 🛑 RULES:
 1. Return each node as: <node id="std_x">standardized heading content</node>
-2. Keep inline tags (<a>, <strong>, <em>, <sup>, <span> etc.) intact.
+2. Keep inline tags (<node/>, </a>, <strong>, <em>, <sup>, <span> etc.) intact.
 3. Do NOT translate or rephrase any text content.
 4. Only adjust numbering prefixes, punctuation markers, or whitespace to match the format rule for that heading's level.
 5. Trim edges; collapse internal spaces to a single space; remove all newlines or tabs.`,
