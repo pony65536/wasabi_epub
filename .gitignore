@@ -1,5 +1,16 @@
 node_modules
 *.epub
 .env
-log
+.env.local
 package-lock.json
+
+# Build output
+dist/
+
+# Generated directories
+logs/
+cache/
+
+# OS files
+.DS_Store
+Thumbs.db
