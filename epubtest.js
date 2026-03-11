@@ -18,13 +18,14 @@ const __dirname = path.dirname(__filename);
 
 // =================== 2. 核心设置 ===================
 const INPUT_FILE_NAME =
-    "The Essays of Warren Buffett Lessons for Corporate America, Fourth Edition (Cunningham, Lawrence A. Buffett, Warren E.) (Z-Library).epub";
-// "One from Many VISA and the Rise of Chaordic Organization (VISA InternationalHock, Dee) (Z-Library).epub";
+    // "The Essays of Warren Buffett Lessons for Corporate America, Fourth Edition (Cunningham, Lawrence A. Buffett, Warren E.) (Z-Library).epub";
+    // "One from Many VISA and the Rise of Chaordic Organization (VISA InternationalHock, Dee) (Z-Library).epub";
+    "The Wealth of Nations (Adam Smith) (z-library.sk, 1lib.sk, z-lib.sk).epub";
 
-const CURRENT_PROVIDER = "mimo";
+const CURRENT_PROVIDER = "qwen";
 
 // 测试模式：null 表示翻译全部章节，数字表示只翻译前 N 章
-const TEST_MODE_LIMIT = 1;
+const TEST_MODE_LIMIT = 2;
 
 const CONFIG = {
     targetLanguage: "Chinese (Simplified)",
@@ -994,28 +995,6 @@ const translateHtmlContent = async (
                   .join("\n")}\n`
             : "";
 
-    const headingRulesMarkdown =
-        headingFormatRules && Object.keys(headingFormatRules).length > 0
-            ? `\nHEADING FORMAT RULES (apply when translating headings):
-${Object.entries(headingFormatRules)
-    .map(([level, rule]) => {
-        if (!rule || rule.type === "plain")
-            return `- ${level}: no numbering prefix, plain title text`;
-        if (rule.type === "mixed")
-            return `- ${level}: mixed format, preserve as-is`;
-        const example =
-            rule.type === "numbered"
-                ? `"1${rule.separator}Title"` +
-                  (rule.depth >= 2 ? ` or "1.1${rule.separator}Title"` : "")
-                : rule.type === "alpha"
-                  ? `"A${rule.separator}Title"`
-                  : `"I${rule.separator}Title"`;
-        return `- ${level}: ${rule.type} prefix, format: ${example}`;
-    })
-    .join("\n")}
-When translating headings, preserve any numeric/alphabetic prefix exactly as-is, and only translate the title text after the prefix.\n`
-            : "";
-
     const translationProcessor = {
         attrName: "data-t-id",
         prompt: `
@@ -1024,7 +1003,6 @@ TASK: Translate the content of each <node> into ${CONFIG.targetLanguage}.
 CONTEXT: Book Chapter "${chapterTitle}".
 Use glossary information when translating.
 ${glossaryMarkdown}
-${headingRulesMarkdown}
 ${STYLE_GUIDE}
 
 🛑 RULES:
