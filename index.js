@@ -11,7 +11,10 @@ import { createProgressCache } from "./src/cache.js";
 import { extractFirstHeading } from "./src/utils.js";
 import { createBatchQueue } from "./src/batchQueue.js";
 import { planTranslationOrder } from "./src/agent.js";
-import { analyzeHeadingFormats, standardizeHeadingsByRules } from "./src/headings.js";
+import {
+    analyzeHeadingFormats,
+    standardizeHeadingsByRules,
+} from "./src/headings.js";
 import { generateInitialGlossary } from "./src/glossary.js";
 import { performTranslation } from "./src/translator.js";
 import { synchronizeTocHtml, synchronizeNcx } from "./src/tocSync.js";
@@ -48,18 +51,20 @@ const main = async () => {
         const zipEntries = zip.getEntries();
         const chapterMap = new Map();
 
-        epub.flow.forEach((chapter) => {
+        Object.values(epub.manifest).forEach((item) => {
+            if (item.mediaType !== "application/xhtml+xml") return; // 只要 HTML 文件
+
             const zipEntry = zipEntries.find((e) =>
                 decodeURIComponent(e.entryName).endsWith(
-                    decodeURIComponent(chapter.href),
+                    decodeURIComponent(item.href),
                 ),
             );
             const html = zipEntry ? zipEntry.getData().toString("utf8") : "";
             const data = {
-                ...chapter,
+                ...item,
                 html,
                 entryName: zipEntry?.entryName,
-                title: chapter.title || extractFirstHeading(html) || "Untitled",
+                title: item.title || extractFirstHeading(html) || "Untitled",
             };
             if (data.entryName) chapterMap.set(data.id, data);
         });
@@ -70,6 +75,7 @@ const main = async () => {
             aiProvider,
             logger,
         );
+        console.log(plan);
 
         // Step 2: 翻译前分析标题格式
         const headingFormatRules = await analyzeHeadingFormats(
