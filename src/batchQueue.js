@@ -7,6 +7,10 @@ export const createBatchQueue = (aiProvider, logger) => {
     const queue = new Queue(
         async (task, cb) => {
             const { batch, $parent, processor } = task;
+            const resolvedPrompt =
+                typeof processor.prompt === "function"
+                    ? processor.prompt(batch)
+                    : processor.prompt;
             const MAX_ATTEMPTS = 3;
             let attempts = 0;
             let success = false;
@@ -32,7 +36,7 @@ export const createBatchQueue = (aiProvider, logger) => {
                     const rawResponse = cleanAIResponse(
                         await aiProvider.callAI(
                             batchInput,
-                            processor.prompt,
+                            resolvedPrompt,
                             false,
                         ),
                     );
@@ -153,7 +157,9 @@ export const processHtmlBatch = async (
     if (nodeList.length === 0) return;
 
     const batches = splitIntoBatches(nodeList);
-    await Promise.all(dispatchBatches(batches, $, processor, batchQueue, logger));
+    await Promise.all(
+        dispatchBatches(batches, $, processor, batchQueue, logger),
+    );
 
     const MAX_RETRY_ROUNDS = 3;
     for (let round = 1; round <= MAX_RETRY_ROUNDS; round++) {

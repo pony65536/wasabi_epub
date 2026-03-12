@@ -75,7 +75,6 @@ const main = async () => {
             aiProvider,
             logger,
         );
-        console.log(plan);
 
         // Step 2: 翻译前分析标题格式
         const headingFormatRules = await analyzeHeadingFormats(

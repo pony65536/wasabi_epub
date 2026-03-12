@@ -24,16 +24,23 @@ export const translateHtmlContent = async (
         }
     });
 
-    const glossaryMarkdown =
-        glossary && Object.keys(glossary).length > 0
-            ? `\nGLOSSARY (Strictly follow these translations):\n${Object.entries(glossary)
-                  .map(([en, zh]) => `- ${en}: ${zh}`)
-                  .join("\n")}\n`
-            : "";
-
     const translationProcessor = {
         attrName: "data-t-id",
-        prompt: `
+        prompt: (batchNodes) => {
+            const batchText = batchNodes
+                .map((n) => n.content)
+                .join(" ")
+                .toLowerCase();
+            const relevantEntries = Object.entries(glossary).filter(([term]) =>
+                batchText.includes(term.toLowerCase()),
+            );
+            const glossaryMarkdown =
+                relevantEntries.length > 0
+                    ? `\nGLOSSARY (Strictly follow these translations):\n${relevantEntries
+                          .map(([en, zh]) => `- ${en}: ${zh}`)
+                          .join("\n")}\n`
+                    : "";
+            return `
 TASK: Translate the content of each <node> into ${CONFIG.targetLanguage}.
 
 CONTEXT: Book Chapter "${chapterTitle}".
@@ -44,7 +51,8 @@ ${STYLE_GUIDE}
 🛑 RULES:
 1. Return each node as: <node id="node_x">translated text</node>
 2. Keep inline tags (<a>, <strong>, </node> etc.) intact.
-        `,
+        `;
+        },
     };
 
     await processHtmlBatch(

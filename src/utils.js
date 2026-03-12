@@ -13,7 +13,7 @@ export const loadHtml = (html) => cheerio.load(html, CHEERIO_OPTIONS);
 export const cleanAIResponse = (raw) => {
     return raw
         .replace(/```[\w]*\n?/g, "") // 去掉 ```xml、```html 等开头
-        .replace(/```/g, "")         // 去掉尾部 ```
+        .replace(/```/g, "") // 去掉尾部 ```
         .trim();
 };
 
@@ -35,21 +35,54 @@ export const resolveAnchorTitle = ($doc, anchor) => {
         return $clone.text().trim().replace(/\s+/g, " ");
     };
 
+    // hgroup 拼接：ordinal + title
+    const resolveHgroup = ($hgroup) => {
+        const $ordinal = $hgroup
+            .find('[epub\\:type~="ordinal"], h1, h2, h3')
+            .first();
+        const $title = $hgroup
+            .find('[epub\\:type~="title"], h4, h5, h6')
+            .first();
+        const ordinal = cleanText($ordinal);
+        const title = cleanText($title);
+        if (ordinal && title) return `${ordinal}：${title}`;
+        return title || ordinal || cleanText($hgroup);
+    };
+
     if (anchor) {
         const $el = $doc(`#${anchor}`);
         if ($el.length > 0) {
+            // 优先检查自身或祖先是否在 hgroup 里
+            const $hgroup = $el.closest("hgroup");
+            if ($hgroup.length) return resolveHgroup($hgroup);
+
             let text = cleanText($el);
             if (!text) {
-                const heading = $el.find("h1, h2, h3, h4, h5, h6").first();
-                text =
-                    heading.length > 0
-                        ? cleanText(heading)
-                        : cleanText($el.nextAll("h1, h2, h3, h4").first());
+                const $heading = $el.find("h1, h2, h3, h4, h5, h6").first();
+                if ($heading.length) {
+                    const $hg = $heading.closest("hgroup");
+                    if ($hg.length) return resolveHgroup($hg);
+                    text = cleanText($heading);
+                } else {
+                    const $next = $el.nextAll("h1, h2, h3, h4").first();
+                    const $hg = $next.closest("hgroup");
+                    if ($hg.length) return resolveHgroup($hg);
+                    text = cleanText($next);
+                }
             }
-            if (!text) text = cleanText($el.closest("h1, h2, h3, h4, h5, h6"));
+            if (!text) {
+                const $closest = $el.closest("h1, h2, h3, h4, h5, h6");
+                const $hg = $closest.closest("hgroup");
+                if ($hg.length) return resolveHgroup($hg);
+                text = cleanText($closest);
+            }
             if (text) return text;
         }
     }
+
+    // fallback：页面第一个标题，也检查 hgroup
+    const $firstHgroup = $doc("hgroup").first();
+    if ($firstHgroup.length) return resolveHgroup($firstHgroup);
     return cleanText($doc("h1, h2, h3").first()) || null;
 };
 
