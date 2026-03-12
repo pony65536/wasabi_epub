@@ -171,18 +171,10 @@ const main = async () => {
 
         // 解析 OPF
         const opfEntry = zipEntries.find((e) => e.entryName.endsWith(".opf"));
-        console.log(opfEntry.toString());
         const opfBasePath = opfEntry.entryName.replace(/[^/]+$/, "");
         const $opf = cheerio.load(opfEntry.getData().toString("utf8"), {
             xmlMode: true,
         });
-        console.log($opf);
-        // $opf("item").each((_, el) => {
-        //     const item = {
-        //         id: $opf(el).attr("id"),
-        //         href: $opf(el).attr("href"),
-        //         mediaType: $opf(el).attr("media-type"),
-        //     };
         $opf("[media-type='application/xhtml+xml']").each((_, el) => {
             const item = {
                 id: $opf(el).attr("id"),
@@ -203,8 +195,6 @@ const main = async () => {
             };
             if (data.entryName) chapterMap.set(data.id, data);
         });
-
-        console.log("chapterMap size:", chapterMap.size);
 
         const referencedIds = collectReferencedIds(chapterMap);
         const definedClasses = collectDefinedClasses(zipEntries);
