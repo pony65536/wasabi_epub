@@ -8,7 +8,7 @@ import { INPUT_FILE_NAME, CURRENT_PROVIDER, CONFIG } from "./src/config.js";
 import { createLogger } from "./src/logger.js";
 import { createAIProvider } from "./src/aiProvider.js";
 import { createProgressCache } from "./src/cache.js";
-import { extractFirstHeading } from "./src/utils.js";
+import { extractFirstHeading, loadHtml } from "./src/utils.js";
 import { createBatchQueue } from "./src/batchQueue.js";
 import { planTranslationOrder } from "./src/agent.js";
 import {
@@ -22,6 +22,29 @@ import { saveEpub } from "./src/epubSaver.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+
+const collectReferencedIds = (chapterMap) => {
+    const referencedIds = new Set();
+    for (const chapter of chapterMap.values()) {
+        const $ = loadHtml(chapter.html);
+        $("a[href]").each((_, el) => {
+            const hash = $(el).attr("href")?.split("#")[1];
+            if (hash) referencedIds.add(hash);
+        });
+    }
+    return referencedIds;
+};
+
+const collectDefinedClasses = (zipEntries) => {
+    const definedClasses = new Set();
+    const cssEntries = zipEntries.filter((e) => e.entryName.endsWith(".css"));
+    for (const entry of cssEntries) {
+        const css = entry.getData().toString("utf8");
+        const matches = css.matchAll(/\.([a-zA-Z][\w-]*)/g);
+        for (const m of matches) definedClasses.add(m[1]);
+    }
+    return definedClasses;
+};
 
 const main = async () => {
     const logger = createLogger(path.resolve(__dirname, "log"));
@@ -51,8 +74,15 @@ const main = async () => {
         const zipEntries = zip.getEntries();
         const chapterMap = new Map();
 
+        // 各步骤结果的默认值，注释掉任意步骤时保证后续步骤正常运行
+        let plan = { sorted: [], tocId: null };
+        let headingFormatRules = [];
+        let glossary = {};
+        let ncxEntry = null;
+        let ncxContent = null;
+
         Object.values(epub.manifest).forEach((item) => {
-            if (item.mediaType !== "application/xhtml+xml") return; // 只要 HTML 文件
+            if (item.mediaType !== "application/xhtml+xml") return;
 
             const zipEntry = zipEntries.find((e) =>
                 decodeURIComponent(e.entryName).endsWith(
@@ -69,26 +99,29 @@ const main = async () => {
             if (data.entryName) chapterMap.set(data.id, data);
         });
 
+        const referencedIds = collectReferencedIds(chapterMap);
+        const definedClasses = collectDefinedClasses(zipEntries);
+
         // Step 1: 规划顺序
-        const plan = await planTranslationOrder(
+        plan = await planTranslationOrder(
             [...chapterMap.values()],
             aiProvider,
             logger,
         );
 
         // Step 2: 翻译前分析标题格式
-        const headingFormatRules = await analyzeHeadingFormats(
-            chapterMap,
-            aiProvider,
-            logger,
-        );
+        // headingFormatRules = await analyzeHeadingFormats(
+        //     chapterMap,
+        //     aiProvider,
+        //     logger,
+        // );
 
-        // Step 3: 生成术语表
-        const glossary = await generateInitialGlossary(
-            chapterMap,
-            aiProvider,
-            logger,
-        );
+        // // Step 3: 生成术语表
+        // glossary = await generateInitialGlossary(
+        //     chapterMap,
+        //     aiProvider,
+        //     logger,
+        // );
 
         // Step 4: 翻译
         await performTranslation(
@@ -99,6 +132,8 @@ const main = async () => {
             batchQueue,
             logger,
             cache,
+            referencedIds,
+            definedClasses,
         );
 
         // 等待队列完全排干
@@ -117,10 +152,10 @@ const main = async () => {
         await synchronizeTocHtml(chapterMap, plan.tocId);
 
         // Step 7: 同步 NCX
-        const { ncxEntry, ncxContent } = await synchronizeNcx(
+        ({ ncxEntry, ncxContent } = await synchronizeNcx(
             chapterMap,
             zipEntries,
-        );
+        ));
 
         // Step 8: 保存文件
         await saveEpub(

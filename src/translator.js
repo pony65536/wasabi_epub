@@ -3,6 +3,20 @@ import { loadHtml } from "./utils.js";
 import { processHtmlBatch } from "./batchQueue.js";
 
 // =================== 单章节翻译 ===================
+const unwrapUselessSpans = ($, referencedIds, definedClasses) => {
+    $("span").each((_, el) => {
+        const { id, class: cls, style, lang } = el.attribs;
+        if (lang) return;
+        if (style) return;
+        if (id && referencedIds.has(id)) return;
+        if (cls) {
+            const classes = cls.split(/\s+/);
+            if (classes.some((c) => c && definedClasses.has(c))) return;
+        }
+        $(el).replaceWith($(el).contents());
+    });
+};
+
 export const translateHtmlContent = async (
     htmlContent,
     chapterTitle,
@@ -10,10 +24,14 @@ export const translateHtmlContent = async (
     aiProvider,
     batchQueue,
     logger,
+    referencedIds = new Set(),
+    definedClasses = new Set(),
 ) => {
     const $ = loadHtml(htmlContent);
-    const nodesToTranslate = [];
 
+    unwrapUselessSpans($, referencedIds, definedClasses);
+
+    const nodesToTranslate = [];
     $("p, li, h1, h2, h3, h4, h5, h6, caption, title").each((i, el) => {
         const $el = $(el);
         const originalHtml = $el.html().trim();
@@ -23,7 +41,6 @@ export const translateHtmlContent = async (
             nodesToTranslate.push({ id: nodeId, content: originalHtml });
         }
     });
-
     const translationProcessor = {
         attrName: "data-t-id",
         prompt: (batchNodes) => {
@@ -42,19 +59,16 @@ export const translateHtmlContent = async (
                     : "";
             return `
 TASK: Translate the content of each <node> into ${CONFIG.targetLanguage}.
-
 CONTEXT: Book Chapter "${chapterTitle}".
 Use glossary information when translating.
 ${glossaryMarkdown}
 ${STYLE_GUIDE}
-
 🛑 RULES:
 1. Return each node as: <node id="node_x">translated text</node>
 2. Keep inline tags (<a>, <strong>, </node> etc.) intact.
         `;
         },
     };
-
     await processHtmlBatch(
         $,
         nodesToTranslate,
@@ -75,17 +89,17 @@ export const performTranslation = async (
     batchQueue,
     logger,
     cache,
+    referencedIds = new Set(),
+    definedClasses = new Set(),
 ) => {
     console.log("\n✍️ Step 4: Translating Book Content...");
     const chaptersToProcess = TEST_MODE_LIMIT
         ? sortedChapters.slice(0, TEST_MODE_LIMIT)
         : sortedChapters;
-
     let skipped = 0;
     for (let i = 0; i < chaptersToProcess.length; i++) {
         const ch = chaptersToProcess[i];
         if (ch.isTOC) continue;
-
         const cached = cache.load(ch.id);
         if (cached) {
             chapterMap.get(ch.id).html = cached;
@@ -95,7 +109,6 @@ export const performTranslation = async (
             );
             continue;
         }
-
         console.log(
             `🚀 [${i + 1}/${chaptersToProcess.length}] Processing Chapter: "${ch.title}"`,
         );
@@ -107,6 +120,8 @@ export const performTranslation = async (
                 aiProvider,
                 batchQueue,
                 logger,
+                referencedIds,
+                definedClasses,
             );
             if (chapterMap.has(ch.id)) {
                 chapterMap.get(ch.id).html = translatedHtml;
@@ -119,11 +134,9 @@ export const performTranslation = async (
             );
         }
     }
-
     if (skipped > 0) {
         console.log(`  ℹ️  ${skipped} chapter(s) restored from cache.`);
     }
-
     cache.clear();
     console.log("  🗑️  Cache cleared after successful translation.");
 };

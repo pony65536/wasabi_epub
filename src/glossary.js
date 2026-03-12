@@ -145,9 +145,6 @@ const queryGlossaryBatch = async (candidates, aiProvider, logger) => {
 
     for (let i = 0; i < candidates.length; i += CANDIDATE_BATCH_SIZE) {
         const batchIndex = Math.floor(i / CANDIDATE_BATCH_SIZE) + 1;
-        console.log(
-            `    - Querying AI for candidates batch ${batchIndex}/${totalBatches}...`,
-        );
 
         const batch = candidates.slice(i, i + CANDIDATE_BATCH_SIZE);
         try {
