@@ -1,6 +1,7 @@
 import * as cheerio from "cheerio";
 import pkg from "natural";
 import { callAIWithRetry } from "./utils.js";
+import { CONFIG } from "./config.js";
 
 const { NGrams, WordTokenizer } = pkg;
 
@@ -34,74 +35,176 @@ const getMostCommonNGrams = (words, n, topK) => {
         .slice(0, topK);
 };
 
-// =================== 术语表生成 ===================
-export const generateInitialGlossary = async (chapterMap, aiProvider, logger) => {
-    console.log("\n📊 Step 3: Generating Initial Glossary...");
-    let glossary = {};
-    try {
-        console.log("    - Reading and cleaning book content...");
-        let fullText = "";
-        for (const chapter of chapterMap.values()) {
-            fullText += cleanText(chapter.html) + " ";
+// =================== 候选词收集 ===================
+const collectCandidates = (chapterMap) => {
+    const tokenizer = new WordTokenizer();
+    const STOP_WORDS = /^(the|and|a|of|to|in|is|it|that|with|as|for|was)$/;
+
+    let fullText = "";
+    const chapterCandidates = {};
+
+    for (const chapter of chapterMap.values()) {
+        const chapterText = cleanText(chapter.html);
+        fullText += chapterText + " ";
+
+        const chapterWords = tokenizer
+            .tokenize(chapterText.toLowerCase())
+            .filter((w) => w.length > 1 && !STOP_WORDS.test(w));
+
+        if (chapterWords.length < 50) continue;
+
+        const chapterNGrams = [
+            ...getMostCommonNGrams(chapterWords, 2, 50),
+            ...getMostCommonNGrams(chapterWords, 3, 50),
+            ...getMostCommonNGrams(chapterWords, 4, 30),
+        ].filter(([, count]) => count >= 3);
+
+        for (const [term, count] of chapterNGrams) {
+            chapterCandidates[term] = (chapterCandidates[term] || 0) + count;
         }
+    }
 
-        console.log("    - Tokenizing and calculating N-Grams...");
-        const tokenizer = new WordTokenizer();
-        const words = tokenizer
-            .tokenize(fullText.toLowerCase())
-            .filter(
-                (w) =>
-                    w.length > 1 &&
-                    !/^(the|and|a|of|to|in|is|it|that|with|as|for|was)$/.test(w),
-            );
+    const words = tokenizer
+        .tokenize(fullText.toLowerCase())
+        .filter((w) => w.length > 1 && !STOP_WORDS.test(w));
 
-        const formatList = (list) =>
-            list.map(([term, count]) => ({
+    const unigramCounts = words.reduce((acc, w) => {
+        acc[w] = (acc[w] || 0) + 1;
+        return acc;
+    }, {});
+
+    const formatList = (entries) =>
+        entries
+            .filter(([, count]) => count >= 3)
+            .map(([term, count]) => ({
                 term,
                 context: getContext(fullText, term),
                 count,
             }));
 
-        const payload = JSON.stringify({
-            bigrams: formatList(getMostCommonNGrams(words, 2, 25)),
-            trigrams: formatList(getMostCommonNGrams(words, 3, 25)),
-        });
+    return {
+        fullText,
+        candidates: [
+            // unigrams
+            ...formatList(
+                Object.entries(unigramCounts)
+                    .sort((a, b) => b[1] - a[1])
+                    .slice(0, 100),
+            ),
+            // full-book ngrams
+            ...formatList(getMostCommonNGrams(words, 2, 100)),
+            ...formatList(getMostCommonNGrams(words, 3, 100)),
+            ...formatList(getMostCommonNGrams(words, 4, 50)),
+            // chapter-merged ngrams
+            ...Object.entries(chapterCandidates)
+                .sort((a, b) => b[1] - a[1])
+                .slice(0, 150)
+                .map(([term, count]) => ({
+                    term,
+                    context: getContext(fullText, term),
+                    count,
+                })),
+        ].filter(
+            // 去重，保留 count 最高的
+            (item, _, arr) =>
+                arr.findIndex((x) => x.term === item.term) ===
+                arr.indexOf(item),
+        ),
+    };
+};
 
-        console.log("    - Sending candidate terms to AI for selection...");
-        const userPrompt = `我想翻译一本电子书，现在使用 n-gram 算法初步筛选了候选词列表。
-请你挑选其中容易导致翻译上下文翻译不一致的词组，尤其挑选日常生活中不常见的用法，但是高频出现在书中的部分，并以 JSON 格式输出。
-输出格式如下，且不要包含任何多余说明文字，只返回纯 JSON 列表：
+// =================== 分批请求 AI ===================
+const CANDIDATE_BATCH_SIZE = 100;
+
+const buildPrompt = (candidateBatch) => `\
+I am translating an ebook into ${CONFIG.targetLanguage}. \
+The following is a list of candidate phrases pre-filtered using an n-gram algorithm.
+
+Please select phrases that are likely to cause translation inconsistencies across \
+chapters — especially those with uncommon usage in everyday language but appear \
+frequently in this book.
+
+Return ONLY a pure JSON object with no extra explanation or markdown formatting:
 {
   "glossary": [
     {
-        "term": "术语名称",
-        "suggested": "建议翻译",
-        "reason": "入选理由",
-        "category": "类别"
+      "term": "original phrase",
+      "suggested": "translation (translation only, no original text or explanatory notes)"
     }
   ]
 }
-下面是我整理的候选项：\n${payload}`;
 
-        const parsedResponse = await callAIWithRetry(
-            aiProvider,
-            userPrompt,
-            "You are a helpful assistant that outputs only JSON.",
+If a candidate phrase cannot be given a reasonable translation, exclude it entirely.
+
+Here are the candidates:
+${JSON.stringify(candidateBatch)}`;
+
+const queryGlossaryBatch = async (candidates, aiProvider, logger) => {
+    const results = [];
+    const totalBatches = Math.ceil(candidates.length / CANDIDATE_BATCH_SIZE);
+
+    for (let i = 0; i < candidates.length; i += CANDIDATE_BATCH_SIZE) {
+        const batchIndex = Math.floor(i / CANDIDATE_BATCH_SIZE) + 1;
+        console.log(
+            `    - Querying AI for candidates batch ${batchIndex}/${totalBatches}...`,
         );
-        const newTerms = parsedResponse.glossary || [];
 
-        if (Array.isArray(newTerms) && newTerms.length > 0) {
-            for (const item of newTerms) {
-                if (item.term && item.suggested)
-                    glossary[item.term] = item.suggested;
-            }
-            console.log(
-                `    - ✅ Glossary generated with ${newTerms.length} terms.`,
+        const batch = candidates.slice(i, i + CANDIDATE_BATCH_SIZE);
+        try {
+            const parsed = await callAIWithRetry(
+                aiProvider,
+                buildPrompt(batch),
+                "You are a helpful assistant that outputs only JSON.",
             );
-            logger.write("GLOSSARY", JSON.stringify(newTerms, null, 2));
-        } else {
-            console.log("    - ⚠️ No terms were suggested by the AI.");
+            const terms = parsed.glossary || [];
+            results.push(...terms);
+        } catch (e) {
+            logger.write(
+                "ERROR",
+                `Glossary batch ${batchIndex} failed: ${e.stack || e.message}`,
+            );
         }
+    }
+    return results;
+};
+
+// =================== 术语表生成 ===================
+export const generateInitialGlossary = async (
+    chapterMap,
+    aiProvider,
+    logger,
+) => {
+    console.log("\n📊 Step 3: Generating Initial Glossary...");
+    const glossary = {};
+
+    try {
+        console.log("    - Reading and cleaning book content...");
+        const { candidates } = collectCandidates(chapterMap);
+        console.log(`    - Collected ${candidates.length} candidate terms.`);
+
+        console.log("    - Sending candidates to AI in batches...");
+        const newTerms = await queryGlossaryBatch(
+            candidates,
+            aiProvider,
+            logger,
+        );
+
+        // 去重合并：同一 term 出现多次时保留第一个
+        const seen = new Set();
+        const dedupedTerms = newTerms.filter(({ term }) => {
+            if (!term || seen.has(term)) return false;
+            seen.add(term);
+            return true;
+        });
+
+        for (const { term, suggested } of dedupedTerms) {
+            if (term && suggested) glossary[term] = suggested;
+        }
+
+        console.log(
+            `    - ✅ Glossary generated with ${dedupedTerms.length} terms.`,
+        );
+        logger.write("GLOSSARY", JSON.stringify(dedupedTerms, null, 2));
     } catch (error) {
         console.error("    - ❌ Failed to generate glossary:", error.message);
         logger.write(

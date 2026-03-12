@@ -36,7 +36,7 @@ export const translateHtmlContent = async (
             );
             const glossaryMarkdown =
                 relevantEntries.length > 0
-                    ? `\nGLOSSARY (Strictly follow these translations):\n${relevantEntries
+                    ? `\nGLOSSARY (Prefer these, but adapt if context requires):\n${relevantEntries
                           .map(([en, zh]) => `- ${en}: ${zh}`)
                           .join("\n")}\n`
                     : "";
