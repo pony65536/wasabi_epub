@@ -199,26 +199,63 @@ const main = async () => {
         const referencedIds = collectReferencedIds(chapterMap);
         const definedClasses = collectDefinedClasses(zipEntries);
 
-        // Step 1: 规划顺序
-        plan = await planTranslationOrder(
-            [...chapterMap.values()],
-            aiProvider,
-            logger,
-        );
+        // 尝试从缓存加载翻译计划、术语表、标题规则
+        const cachedPlan = cache.loadPlan();
+        const cachedGlossary = cache.loadGlossary();
+        const cachedHeadingRules = cache.loadHeadingRules();
+        const cachedChapterCount = cache.count();
+        const totalChapters = chapterMap.size;
 
-        // Step 2: 翻译前分析标题格式
-        headingFormatRules = await analyzeHeadingFormats(
-            chapterMap,
-            aiProvider,
-            logger,
-        );
+        // Step 1: 规划顺序（如果缓存不存在）
+        if (cachedPlan) {
+            console.log("\n🕵️ Step 1: Loading translation plan from cache...");
+            plan = cachedPlan;
+            // 恢复 chapterMap 中的 isTOC 标记
+            if (plan.tocId) {
+                const tocChapter = chapterMap.get(plan.tocId);
+                if (tocChapter) tocChapter.isTOC = true;
+            }
+        } else {
+            plan = await planTranslationOrder(
+                [...chapterMap.values()],
+                aiProvider,
+                logger,
+            );
+            cache.savePlan(plan);
+        }
 
-        // Step 3: 生成术语表
-        glossary = await generateInitialGlossary(
-            chapterMap,
-            aiProvider,
-            logger,
-        );
+        // Step 2: 翻译前分析标题格式（如果缓存不存在）
+        if (cachedHeadingRules && cachedHeadingRules.length > 0) {
+            console.log("\n🔍 Step 2: Loading heading format rules from cache...");
+            headingFormatRules = cachedHeadingRules;
+        } else {
+            headingFormatRules = await analyzeHeadingFormats(
+                chapterMap,
+                aiProvider,
+                logger,
+            );
+            cache.saveHeadingRules(headingFormatRules);
+        }
+
+        // Step 3: 生成术语表（如果缓存不存在）
+        if (cachedGlossary && Object.keys(cachedGlossary).length > 0) {
+            console.log("\n📊 Step 3: Loading glossary from cache...");
+            glossary = cachedGlossary;
+        } else {
+            glossary = await generateInitialGlossary(
+                chapterMap,
+                aiProvider,
+                logger,
+            );
+            cache.saveGlossary(glossary);
+        }
+
+        // 如果有部分章节已完成翻译，显示进度
+        if (cachedChapterCount > 0) {
+            console.log(
+                `\n📑 Found ${cachedChapterCount}/${totalChapters} chapters already translated.`,
+            );
+        }
 
         // Step 4: 翻译
         await performTranslation(
@@ -264,12 +301,10 @@ const main = async () => {
             logger,
         );
 
-        console.log(
-            `\n✅ All done! Cache preserved at: ${path.basename(cacheDir)}`,
-        );
-        console.log(
-            `   (Delete the cache folder to force a full re-translation next time)`,
-        );
+        // 翻译全部完成后清除缓存
+        cache.clear();
+
+        console.log(`\n✅ All done! Output: ${path.basename(outputPath)}`);
     } catch (e) {
         logger.write(
             "ERROR",

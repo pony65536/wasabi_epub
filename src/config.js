@@ -1,12 +1,12 @@
 // =================== 核心设置 ===================
 export const INPUT_FILE_NAME =
     // "The Essays of Warren Buffett Lessons for Corporate America, Fourth Edition (Cunningham, Lawrence A. Buffett, Warren E.) (Z-Library).epub";
-    "Black Holes The Key to Understanding... (Z-Library).epub";
+    "One_from_Many.epub";
 
 export const CURRENT_PROVIDER = "qwen";
 
 // 测试模式：null 表示翻译全部章节，数字表示只翻译前 N 章
-export const TEST_MODE_LIMIT = null;
+export const TEST_MODE_LIMIT = 3;
 
 export const CONFIG = {
     targetLanguage: "Chinese (Simplified)",

@@ -137,6 +137,5 @@ export const performTranslation = async (
     if (skipped > 0) {
         console.log(`  ℹ️  ${skipped} chapter(s) restored from cache.`);
     }
-    cache.clear();
-    console.log("  🗑️  Cache cleared after successful translation.");
+    // Cache is now cleared in index.js after epub is saved
 };
