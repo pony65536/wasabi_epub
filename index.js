@@ -1,97 +1,3 @@
-// import "dotenv/config";
-// // import { EPub } from "epub2";
-// import AdmZip from "adm-zip";
-// import path from "path";
-// import { fileURLToPath } from "url";
-
-// import { INPUT_FILE_NAME, CURRENT_PROVIDER, CONFIG } from "./src/config.js";
-// import { createLogger } from "./src/logger.js";
-// import { createAIProvider } from "./src/aiProvider.js";
-// import { createProgressCache } from "./src/cache.js";
-// import { extractFirstHeading, loadHtml } from "./src/utils.js";
-// import { createBatchQueue } from "./src/batchQueue.js";
-// import { planTranslationOrder } from "./src/agent.js";
-// import {
-//     analyzeHeadingFormats,
-//     standardizeHeadingsByRules,
-// } from "./src/headings.js";
-// import { generateInitialGlossary } from "./src/glossary.js";
-// import { performTranslation } from "./src/translator.js";
-// import { synchronizeTocHtml, synchronizeNcx } from "./src/tocSync.js";
-// import { saveEpub } from "./src/epubSaver.js";
-
-// const __filename = fileURLToPath(import.meta.url);
-// const __dirname = path.dirname(__filename);
-
-// const collectReferencedIds = (chapterMap) => {
-//     const referencedIds = new Set();
-//     for (const chapter of chapterMap.values()) {
-//         const $ = loadHtml(chapter.html);
-//         $("a[href]").each((_, el) => {
-//             const hash = $(el).attr("href")?.split("#")[1];
-//             if (hash) referencedIds.add(hash);
-//         });
-//     }
-//     return referencedIds;
-// };
-
-// const collectDefinedClasses = (zipEntries) => {
-//     const definedClasses = new Set();
-//     const cssEntries = zipEntries.filter((e) => e.entryName.endsWith(".css"));
-//     for (const entry of cssEntries) {
-//         const css = entry.getData().toString("utf8");
-//         const matches = css.matchAll(/\.([a-zA-Z][\w-]*)/g);
-//         for (const m of matches) definedClasses.add(m[1]);
-//     }
-//     return definedClasses;
-// };
-
-// const main = async () => {
-//     const logger = createLogger(path.resolve(__dirname, "log"));
-//     const aiProvider = createAIProvider(CURRENT_PROVIDER, CONFIG, logger);
-//     const batchQueue = createBatchQueue(aiProvider, logger);
-
-//     const fileInfo = path.parse(INPUT_FILE_NAME);
-//     const activeModelName = aiProvider.modelName.replace(/[\/\\]/g, "-");
-//     const inputPath = path.resolve(__dirname, INPUT_FILE_NAME);
-//     const outputPath = path.resolve(
-//         __dirname,
-//         `${fileInfo.name}_${activeModelName}.epub`,
-//     );
-
-//     const cacheDir = path.resolve(__dirname, `.cache_${fileInfo.name}`);
-//     const cache = createProgressCache(cacheDir);
-
-//     console.log(`\n========================================`);
-//     console.log(`📖 Input:  ${path.basename(inputPath)}`);
-//     console.log(`💾 Output: ${path.basename(outputPath)}`);
-//     console.log(`📦 Cache:  ${path.basename(cacheDir)}`);
-//     console.log(`========================================\n`);
-
-//     try {
-//         const zip = new AdmZip(inputPath);
-//         // const epub = await EPub.createAsync(inputPath);
-//         const zipEntries = zip.getEntries();
-//         const chapterMap = new Map();
-
-//         Object.values(epub.manifest).forEach((item) => {
-//             if (item.mediaType !== "application/xhtml+xml") return;
-
-//             const zipEntry = zipEntries.find((e) =>
-//                 decodeURIComponent(e.entryName).endsWith(
-//                     decodeURIComponent(item.href),
-//                 ),
-//             );
-//             const html = zipEntry ? zipEntry.getData().toString("utf8") : "";
-//             const data = {
-//                 ...item,
-//                 html,
-//                 entryName: zipEntry?.entryName,
-//                 title: item.title || extractFirstHeading(html) || "Untitled",
-//             };
-//             if (data.entryName) chapterMap.set(data.id, data);
-//         });
-
 import "dotenv/config";
 import AdmZip from "adm-zip";
 import * as cheerio from "cheerio";
@@ -226,7 +132,9 @@ const main = async () => {
 
         // Step 2: 翻译前分析标题格式（如果缓存不存在）
         if (cachedHeadingRules && cachedHeadingRules.length > 0) {
-            console.log("\n🔍 Step 2: Loading heading format rules from cache...");
+            console.log(
+                "\n🔍 Step 2: Loading heading format rules from cache...",
+            );
             headingFormatRules = cachedHeadingRules;
         } else {
             headingFormatRules = await analyzeHeadingFormats(
