@@ -171,7 +171,6 @@ export const performTranslation = async (
             continue;
         }
 
-        console.log(`🚀 [${i + 1}/${total}] Enqueuing: "${ch.title}"`);
         pending.push({ ch, index: i });
     }
 
