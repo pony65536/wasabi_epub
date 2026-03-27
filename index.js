@@ -210,7 +210,7 @@ const main = async () => {
         );
 
         // 翻译全部完成后清除缓存
-        cache.clear();
+        // cache.clear();
 
         console.log(`\n✅ All done! Output: ${path.basename(outputPath)}`);
     } catch (e) {
