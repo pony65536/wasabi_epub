@@ -1,11 +1,20 @@
 // =================== 核心设置 ===================
 export const INPUT_FILE_NAME =
-    "The Essays of Warren Buffett Lessons for Corporate America, Fourth Edition (Cunningham, Lawrence A. Buffett, Warren E.) (Z-Library).epub";
+    "Treasure Island The Master Edition (Robert Louis Stevenson, Kent David Kelly) (z-library.sk, 1lib.sk, z-lib.sk).epub";
 
-export const CURRENT_PROVIDER = "qwen";
+export const CURRENT_PROVIDER = "mimo";
 
 // 测试模式：null 表示翻译全部章节，数字表示只翻译前 N 章
 export const TEST_MODE_LIMIT = null;
+
+export const OPENROUTER_MODEL =
+    // "google/gemini-2.5-pro-preview";
+    // "anthropic/claude-sonnet-4-5";
+    // "deepseek/deepseek-r1";
+    // "meta-llama/llama-4-maverick";
+    // "mistralai/mistral-medium-3";
+    // "qwen/qwen3-235b-a22b";
+    "xiaomi/mimo-v2-pro";
 
 export const CONFIG = {
     targetLanguage: "Chinese (Simplified)",
@@ -23,7 +32,13 @@ export const CONFIG = {
     mimo: {
         apiKey: process.env.MIMO_API_KEY,
         baseURL: "https://api.xiaomimimo.com/v1",
-        modelName: "mimo-v2-flash",
+        modelName: "mimo-v2-pro",
+        concurrency: 5,
+    },
+    openrouter: {
+        apiKey: process.env.OPENROUTER_API_KEY,
+        baseURL: "https://openrouter.ai/api/v1",
+        modelName: OPENROUTER_MODEL,
         concurrency: 5,
     },
 };
