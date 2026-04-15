@@ -2,6 +2,12 @@ import Queue from "better-queue";
 import * as cheerio from "cheerio";
 import { cleanAIResponse } from "./utils.js";
 
+const previewText = (text, maxLength = 300) => {
+    const normalized = String(text ?? "").replace(/\s+/g, " ").trim();
+    if (normalized.length <= maxLength) return normalized;
+    return `${normalized.slice(0, maxLength)}...`;
+};
+
 // =================== 批处理队列工厂 ===================
 export const createBatchQueue = (aiProvider, logger) => {
     const queue = new Queue(
@@ -45,32 +51,59 @@ export const createBatchQueue = (aiProvider, logger) => {
                         `<root>${rawResponse}</root>`,
                         { xmlMode: true, decodeEntities: false },
                     );
+                    const updates = [];
+                    const missingNodeIds = [];
 
                     for (const node of batch) {
                         const $node = $response(`node[id="${node.id}"]`);
 
                         if ($node.length === 0) {
-                            logger.write(
-                                "WARN",
-                                `Node ${node.id} missing from AI response, will retry.`,
-                            );
+                            missingNodeIds.push(node.id);
                             continue;
                         }
 
                         const processedContent = $node.html()?.trim();
-                        if (!processedContent) continue;
+                        if (!processedContent) {
+                            missingNodeIds.push(node.id);
+                            continue;
+                        }
 
                         try {
                             cheerio.load(processedContent, { xmlMode: true });
-                            $parent(`[${processor.attrName}="${node.id}"]`)
-                                .html(processedContent)
-                                .removeAttr(processor.attrName);
+                            updates.push({ nodeId: node.id, processedContent });
                         } catch (xmlError) {
-                            logger.write(
-                                "ERROR",
+                            const invalidHtmlError = new Error(
                                 `Node ${node.id} invalid HTML: ${xmlError.message}`,
                             );
+                            invalidHtmlError.responsePreview =
+                                previewText(rawResponse);
+                            throw invalidHtmlError;
                         }
+                    }
+
+                    if (missingNodeIds.length > 0) {
+                        const missingError = new Error(
+                            `Batch response incomplete. Missing or empty nodes: ${missingNodeIds.join(", ")}`,
+                        );
+                        missingError.responsePreview = previewText(rawResponse);
+                        throw missingError;
+                    }
+
+                    for (const update of updates) {
+                        const $target = $parent(
+                            `[${processor.attrName}="${update.nodeId}"]`,
+                        );
+                        if ($target.length === 0) {
+                            const targetMissingError = new Error(
+                                `Node ${update.nodeId} could not be written back to the document.`,
+                            );
+                            targetMissingError.responsePreview =
+                                previewText(rawResponse);
+                            throw targetMissingError;
+                        }
+                        $target
+                            .html(update.processedContent)
+                            .removeAttr(processor.attrName);
                     }
 
                     success = true;
@@ -78,7 +111,7 @@ export const createBatchQueue = (aiProvider, logger) => {
                 } catch (e) {
                     logger.write(
                         "ERROR",
-                        `Batch Queue Attempt ${attempts} Failed: ${e.stack || e.message}`,
+                        `Batch Queue Attempt ${attempts} Failed: ${e.stack || e.message}${e.responsePreview ? `\nResponse Preview: ${e.responsePreview}` : ""}`,
                     );
                     if (attempts >= MAX_ATTEMPTS) cb(e);
                     else await new Promise((r) => setTimeout(r, 2000));
@@ -90,8 +123,7 @@ export const createBatchQueue = (aiProvider, logger) => {
 
     const drainQueue = () =>
         new Promise((resolve) => {
-            const isIdle = () =>
-                queue._running === 0 && queue._queue.length === 0;
+            const isIdle = () => queue._running === 0 && queue.length === 0;
             if (isIdle()) return resolve();
             queue.once("drain", resolve);
         });
@@ -128,13 +160,13 @@ export const dispatchBatches = (batches, $, processor, batchQueue, logger) =>
             new Promise((resolve) => {
                 batchQueue.queue
                     .push({ batch, $parent: $, processor })
-                    .on("finish", () => resolve())
+                    .on("finish", () => resolve({ ok: true, batch }))
                     .on("failed", (err) => {
                         logger.write(
                             "ERROR",
                             `Batch Task Failed: ${err?.message}`,
                         );
-                        resolve();
+                        resolve({ ok: false, batch, error: err });
                     });
             }),
     );

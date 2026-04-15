@@ -35,7 +35,7 @@ export const analyzeHeadingFormats = async (chapterMap, aiProvider, logger) => {
         `  - Collected ${samples.length} unique headings, sending to AI...`,
     );
 
-    const systemPrompt = `You are an expert book translator (English → ${CONFIG.targetLanguage}).
+    const systemPrompt = `You are an expert book translator (${CONFIG.sourceLanguage} → ${CONFIG.targetLanguage}).
 Task: Review ALL the heading samples below. For headings that have a special prefix format requiring conversion, provide the translated version as a format example. For plain titles with no special prefix, do NOT include them in the output.
 
 A heading qualifies as a format example if it contains:
@@ -217,8 +217,7 @@ ${rulesDescription}
     const drainWriteBackQueue = () =>
         new Promise((resolve) => {
             const isIdle = () =>
-                writeBackQueue._running === 0 &&
-                writeBackQueue._queue.length === 0;
+                writeBackQueue._running === 0 && writeBackQueue.length === 0;
             if (isIdle()) return resolve();
             writeBackQueue.once("drain", resolve);
         });

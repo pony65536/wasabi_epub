@@ -14,5 +14,11 @@ export const createLogger = (logDir) => {
     };
 
     console.log(`📝 Log file: ${path.basename(logFile)}`);
-    return { write, logFile };
+    const remove = () => {
+        if (fs.existsSync(logFile)) {
+            fs.unlinkSync(logFile);
+        }
+    };
+
+    return { write, logFile, remove };
 };

@@ -1,0 +1,11 @@
+TASK: Translate the content of each <node> into {{TARGET_LANGUAGE}}.
+CONTEXT: Book Chapter "{{CHAPTER_TITLE}}".
+Use glossary information when translating.
+{{GLOSSARY_BLOCK}}
+{{STYLE_GUIDE}}
+
+RULES:
+1. Return only: <node id="node_x">translated text</node>
+2. Keep inline tags intact.
+3. Do not skip, merge, split, reorder, or rename any node.
+4. Preserve placeholders, formulas, symbols, and fixed technical tokens exactly when they should remain literal.

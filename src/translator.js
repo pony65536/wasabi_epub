@@ -1,10 +1,20 @@
-import { CONFIG, STYLE_GUIDE, TEST_MODE_LIMIT } from "./config.js";
+import { CONFIG, buildStyleGuide } from "./config.js";
+import fs from "fs";
 import { loadHtml } from "./utils.js";
 import {
     splitIntoBatches,
     dispatchBatches,
     collectFailedNodes,
 } from "./batchQueue.js";
+import path from "path";
+import { fileURLToPath } from "url";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const TRANSLATION_PROMPT_TEMPLATE = fs.readFileSync(
+    path.resolve(__dirname, "../prompts/epub_translation_prompt.txt"),
+    "utf8",
+);
 
 // =================== 单章节翻译 ===================
 const unwrapUselessSpans = ($, referencedIds, definedClasses) => {
@@ -70,27 +80,69 @@ const enqueueChapterTranslation = (
                           .map(([en, zh]) => `- ${en}: ${zh}`)
                           .join("\n")}\n`
                     : "";
-            return `
-TASK: Translate the content of each <node> into ${CONFIG.targetLanguage}.
-CONTEXT: Book Chapter "${chapterTitle}".
-Use glossary information when translating.
-${glossaryMarkdown}
-${STYLE_GUIDE}
-🛑 RULES:
-1. Return each node as: <node id="node_x">translated text</node>
-2. Keep inline tags (<a>, <strong>, </node> etc.) intact.
-        `;
+            return TRANSLATION_PROMPT_TEMPLATE.replace(
+                "{{TARGET_LANGUAGE}}",
+                CONFIG.targetLanguage,
+            )
+                .replace("{{CHAPTER_TITLE}}", chapterTitle)
+                .replace("{{GLOSSARY_BLOCK}}", glossaryMarkdown)
+                .replace(
+                    "{{STYLE_GUIDE}}",
+                    buildStyleGuide(CONFIG.targetLanguage),
+                )
+                .trim();
         },
     });
+
+    const dispatchRound = async (nodes, processor) => {
+        const batches = splitIntoBatches(nodes);
+        return Promise.all(
+            dispatchBatches(batches, $, processor, batchQueue, logger),
+        );
+    };
+
+    const fallbackToSingleNodes = async (roundLabel, processor) => {
+        const failedNodes = collectFailedNodes($, processor.attrName);
+        if (failedNodes.length === 0) return;
+
+        console.log(
+            `    - ↘️ [${roundLabel}] Falling back to single-node retries for ${failedNodes.length} node(s)...`,
+        );
+
+        const singleNodeBatches = failedNodes.map((node) => [node]);
+        await Promise.all(
+            dispatchBatches(
+                singleNodeBatches,
+                $,
+                processor,
+                batchQueue,
+                logger,
+            ),
+        );
+
+        const unresolvedNodes = collectFailedNodes($, processor.attrName);
+        if (unresolvedNodes.length === 0) return;
+
+        const unresolvedIds = unresolvedNodes.map((node) => node.id);
+        logger.write(
+            "WARN",
+            `Chapter "${roundLabel}" has ${unresolvedIds.length} unresolved node(s) after single-node fallback: ${unresolvedIds.join(", ")}`,
+        );
+        console.log(
+            `    - ⚠️ [${roundLabel}] ${unresolvedIds.length} node(s) could not be translated and were left as source text.`,
+        );
+        for (const unresolvedNode of unresolvedNodes) {
+            $(`[${processor.attrName}="${unresolvedNode.id}"]`).removeAttr(
+                processor.attrName,
+            );
+        }
+    };
 
     // 把首轮所有 batch 入队，返回一个 Promise chain：
     // 首轮完成 → 检查失败节点 → 最多 3 轮重试 → resolve 最终 HTML
     const runRound = async (nodes, roundLabel) => {
         const processor = makeProcessor();
-        const batches = splitIntoBatches(nodes);
-        await Promise.all(
-            dispatchBatches(batches, $, processor, batchQueue, logger),
-        );
+        await dispatchRound(nodes, processor);
 
         const MAX_RETRY_ROUNDS = 3;
         for (let round = 1; round <= MAX_RETRY_ROUNDS; round++) {
@@ -99,11 +151,10 @@ ${STYLE_GUIDE}
             console.log(
                 `    - ⚠️ [${roundLabel}] Retrying ${failedNodes.length} failed nodes (Round ${round}/${MAX_RETRY_ROUNDS})...`,
             );
-            const retryBatches = splitIntoBatches(failedNodes);
-            await Promise.all(
-                dispatchBatches(retryBatches, $, processor, batchQueue, logger),
-            );
+            await dispatchRound(failedNodes, processor);
         }
+
+        await fallbackToSingleNodes(roundLabel, processor);
     };
 
     // 返回整个异步链，但 enqueue 动作是立即发生的（不等 await）
@@ -148,17 +199,13 @@ export const performTranslation = async (
     definedClasses = new Set(),
 ) => {
     console.log("\n✍️ Step 4: Translating Book Content...");
-    const chaptersToProcess = TEST_MODE_LIMIT
-        ? sortedChapters.slice(0, TEST_MODE_LIMIT)
-        : sortedChapters;
-
     let skipped = 0;
-    const total = chaptersToProcess.length;
+    const total = sortedChapters.length;
 
     // 过滤掉已缓存和 TOC，剩余章节同时入队
     const pending = [];
     for (let i = 0; i < total; i++) {
-        const ch = chaptersToProcess[i];
+        const ch = sortedChapters[i];
         if (ch.isTOC) continue;
 
         const cached = cache.load(ch.id);

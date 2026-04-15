@@ -1,56 +1,100 @@
 // =================== 核心设置 ===================
-export const INPUT_FILE_NAME =
-    "Treasure Island The Master Edition (Robert Louis Stevenson, Kent David Kelly) (z-library.sk, 1lib.sk, z-lib.sk).epub";
+const env = process.env;
 
-export const CURRENT_PROVIDER = "mimo";
+const normalizeProvider = (value, fallback) =>
+    (value || fallback || "").trim().toLowerCase();
 
-// 测试模式：null 表示翻译全部章节，数字表示只翻译前 N 章
-export const TEST_MODE_LIMIT = null;
+const envFlag = (value, fallback = false) => {
+    if (value == null || value === "") return fallback;
+    return /^(1|true|yes|on)$/i.test(String(value).trim());
+};
 
-export const OPENROUTER_MODEL =
-    // "google/gemini-2.5-pro-preview";
-    // "anthropic/claude-sonnet-4-5";
-    // "deepseek/deepseek-r1";
-    // "meta-llama/llama-4-maverick";
-    // "mistralai/mistral-medium-3";
-    // "qwen/qwen3-235b-a22b";
-    "xiaomi/mimo-v2-pro";
+const getProviderModel = (providerName, defaultModel) => {
+    const upper = providerName.toUpperCase();
+    const directEnvModel = env[`${upper}_MODEL`];
+    if (directEnvModel) return directEnvModel;
+
+    if (CURRENT_PROVIDER === providerName && env.PRIMARY_MODEL) {
+        return env.PRIMARY_MODEL;
+    }
+
+    if (FALLBACK_PROVIDER === providerName && env.FALLBACK_MODEL) {
+        return env.FALLBACK_MODEL;
+    }
+
+    return defaultModel;
+};
+
+export const CURRENT_PROVIDER = normalizeProvider(
+    env.PRIMARY_PROVIDER || env.PROVIDER,
+    "qwen",
+);
+export const FALLBACK_PROVIDER = normalizeProvider(env.FALLBACK_PROVIDER, "openrouter");
+export const FALLBACK_ON_CONTENT_POLICY = envFlag(
+    env.FALLBACK_ON_CONTENT_POLICY || env.FALLBACK_ON_CONTENT_FILTER,
+    true,
+);
+export const DEFAULT_SOURCE_LANGUAGE = "English";
+export const DEFAULT_TARGET_LANGUAGE = "Chinese (Simplified)";
+
+export const RUSSIAN_GLOSSARY_PROVIDER = normalizeProvider(
+    env.RUSSIAN_GLOSSARY_PROVIDER,
+    "openrouter",
+);
+export const RUSSIAN_GLOSSARY_MODEL =
+    env.RUSSIAN_GLOSSARY_MODEL ||
+    "mistralai/mistral-small-3.1-24b-instruct";
+export const JAPANESE_GLOSSARY_PROVIDER = normalizeProvider(
+    env.JAPANESE_GLOSSARY_PROVIDER,
+    "openrouter",
+);
+export const JAPANESE_GLOSSARY_MODEL =
+    env.JAPANESE_GLOSSARY_MODEL ||
+    "anthropic/claude-sonnet-4.5";
 
 export const CONFIG = {
-    targetLanguage: "Chinese (Simplified)",
+    sourceLanguage: DEFAULT_SOURCE_LANGUAGE,
+    targetLanguage: DEFAULT_TARGET_LANGUAGE,
     gemini: {
         apiKey: process.env.GEMINI_API_KEY,
-        modelName: "gemini-2.5-pro",
-        concurrency: 1,
+        modelName: getProviderModel("gemini", "gemini-2.5-pro"),
+        concurrency: 5,
     },
     qwen: {
         apiKey: process.env.QWEN_API_KEY,
-        baseURL: "https://dashscope.aliyuncs.com/compatible-mode/v1",
-        modelName: "qwen3-max",
+        baseURL:
+            process.env.QWEN_BASE_URL ||
+            "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        modelName: getProviderModel("qwen", "qwen-plus"),
         concurrency: 5,
     },
     mimo: {
         apiKey: process.env.MIMO_API_KEY,
-        baseURL: "https://api.xiaomimimo.com/v1",
-        modelName: "mimo-v2-pro",
+        baseURL: process.env.MIMO_BASE_URL || "https://api.xiaomimimo.com/v1",
+        modelName: getProviderModel("mimo", "mimo-v2-pro"),
         concurrency: 5,
     },
     openrouter: {
         apiKey: process.env.OPENROUTER_API_KEY,
-        baseURL: "https://openrouter.ai/api/v1",
-        modelName: OPENROUTER_MODEL,
+        baseURL: process.env.OPENROUTER_BASE_URL || "https://openrouter.ai/api/v1",
+        modelName: getProviderModel("openrouter", "x-ai/grok-4.1-fast"),
         concurrency: 5,
+        requestOptions: {
+            reasoning: {
+                enabled: envFlag(process.env.OPENROUTER_REASONING_ENABLED, true),
+            },
+        },
     },
 };
 
-// =================== 翻译风格指南 ===================
-export const STYLE_GUIDE = `
-TRANSLATION STYLE GUIDE (Target: Chinese Simplified):
-1. **Rephrase**: Natural Chinese (Easy to read).
-2. **Split Long Sentences**: Break down long English clauses.
-3. **Tone**: Professional, insightful.
-4. **Vocabulary**: Use appropriate idioms (Chengyu) where natural.
-5. **No Translationese**: Avoid passive voice (e.g., limit usage of "被").
+export const buildStyleGuide = (targetLanguage) => `
+TRANSLATION STYLE GUIDE (Target: ${targetLanguage}):
+1. **Write Natural ${targetLanguage}**: Prefer clear, accurate, fluent modern language over mechanical source-like syntax.
+2. **Adapt to Genre**: Keep expository, scientific, or technical passages clearer and more direct; allow more expressive wording when the source is narrative or literary.
+3. **Keep the Meaning Intact**: Preserve logical relations, semantic links, and meaningful modifiers, including scope, degree, contrast, sequence, jointly, respectively, collectively, and simultaneously.
+4. **Split When Helpful**: Break long sentences when it improves clarity, but keep the full meaning and flow.
+5. **Use Style with Restraint**: Idioms or more refined wording are welcome when natural and fitting, but avoid showy or over-elevated phrasing.
+6. **Keep It Clean**: Do not add glossary-style notes, bilingual pairs, translator comments, or explanatory brackets unless they appear in the source.
 
 HEADING FORMATTING RULES:
 1. **Consistency**: Table of Contents must match Main Body.

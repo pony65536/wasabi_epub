@@ -20,10 +20,17 @@ export const createProgressCache = (cacheDir) => {
     };
 
     const clear = () => {
+        if (!fs.existsSync(cacheDir)) return;
         for (const f of fs.readdirSync(cacheDir)) {
             fs.unlinkSync(path.join(cacheDir, f));
         }
         console.log("🗑️  Cache cleared.");
+    };
+
+    const removeDir = () => {
+        if (!fs.existsSync(cacheDir)) return;
+        fs.rmSync(cacheDir, { recursive: true, force: true });
+        console.log(`🗑️  Cache directory removed: ${path.basename(cacheDir)}`);
     };
 
     const count = () =>
@@ -88,5 +95,6 @@ export const createProgressCache = (cacheDir) => {
         saveHeadingRules,
         loadHeadingRules,
         hasAnyCache,
+        removeDir,
     };
 };
