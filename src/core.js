@@ -11,21 +11,21 @@ import {
     RUSSIAN_GLOSSARY_MODEL,
     RUSSIAN_GLOSSARY_PROVIDER,
 } from "./config.js";
-import { createLogger } from "./logger.js";
-import { createAIProvider } from "./aiProvider.js";
-import { createProgressCache } from "./cache.js";
-import { selectChaptersBySpec } from "./chapterSelection.js";
+import { createLogger } from "./support/logger.js";
+import { createAIProvider } from "./translation/aiProvider.js";
+import { createProgressCache } from "./support/cache.js";
+import { selectChaptersBySpec } from "./support/chapterSelection.js";
 import { extractFirstHeading, loadHtml } from "./utils.js";
-import { createBatchQueue } from "./batchQueue.js";
+import { createBatchQueue } from "./translation/batchQueue.js";
 import { planTranslationOrder } from "./agent.js";
 import {
     analyzeHeadingFormats,
     standardizeHeadingsByRules,
-} from "./headings.js";
-import { generateInitialGlossary } from "./glossary.js";
-import { performTranslation } from "./translator.js";
-import { synchronizeTocHtml, synchronizeNcx } from "./tocSync.js";
-import { saveEpub } from "./epubSaver.js";
+} from "./content/headings.js";
+import { generateInitialGlossary } from "./content/glossary.js";
+import { performTranslation } from "./translation/translator.js";
+import { synchronizeTocHtml, synchronizeNcx } from "./epub/tocSync.js";
+import { saveEpub } from "./epub/epubSaver.js";
 
 const sanitizeFileToken = (value) =>
     value.replace(/['"]/g, "").replace(/[<>:"/\\|?*\s]+/g, "_");
@@ -371,6 +371,7 @@ export const runTranslationJob = async ({
             cache,
             referencedIds,
             definedClasses,
+            debugMode,
         );
 
         await batchQueue.drainQueue();
@@ -522,6 +523,7 @@ export const runHtmlTranslationJob = async ({
                 cache,
                 referencedIds,
                 definedClasses,
+                debugMode,
             );
             await batchQueue.drainQueue();
         }

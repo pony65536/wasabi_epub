@@ -1,6 +1,6 @@
 import Queue from "better-queue";
 import * as cheerio from "cheerio";
-import { cleanAIResponse } from "./utils.js";
+import { cleanAIResponse } from "../utils.js";
 
 const previewText = (text, maxLength = 300) => {
     const normalized = String(text ?? "").replace(/\s+/g, " ").trim();

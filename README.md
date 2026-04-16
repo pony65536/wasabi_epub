@@ -1,74 +1,85 @@
 # EPUB / HTML 自动翻译工具
 
-将英文 EPUB 电子书或 HTML 文档自动翻译为目标语言，尽量保留原有排版结构；EPUB 模式还会同步目录导航和标题格式。
-
----
+将 EPUB 电子书或单个 HTML 文档翻译为目标语言，尽量保留原有结构与排版。EPUB 模式会额外处理章节顺序、标题格式、目录同步和缓存续跑；HTML 模式适合单文件文档翻译。
 
 ## 功能概览
 
-- **多 AI Provider 支持**：内置 Gemini、Qwen（通义千问）、Mimo 三个提供商，通过配置一键切换
-- **智能章节规划**：AI Agent 自动识别目录页、分析章节结构，优先翻译正文再翻译前言后记，提升术语一致性
-- **标题格式分析**：翻译前提取全书标题样本，生成格式规范（如 `Chapter I` → `第一章`），翻译后统一应用
-- **自动术语表**：使用 N-gram 算法提取高频词组，经 AI 筛选生成术语表，确保专业词汇全书译法一致
-- **批处理 + 并发**：HTML 节点分批并发发送，支持单批失败自动重试（最多 3 轮）
-- **断点续传**：每章翻译完成后写入磁盘缓存，中断后重启自动跳过已完成章节
-- **HTML 单文件翻译**：支持直接输入 `.html/.htm` 文档并输出翻译后的 HTML 文件
-- **目录同步**：翻译完成后自动将 HTML TOC 页面与 NCX 导航元数据更新为中文标题
-- **日志记录**：每次运行生成独立日志文件，记录所有 AI 请求、响应及错误信息
-
----
+- 支持 `EPUB` 和 `HTML / HTM` 输入
+- CLI 支持输入文件、章节选择、源语言、目标语言、并发和调试开关
+- 多 Provider 支持：`Gemini`、`Qwen`、`Mimo`、`OpenRouter`
+- 支持多语言工作流：英语、西班牙语、法语、俄语、简体中文、日语、韩语
+- 自动章节规划：识别 TOC，优先翻译正文，再处理前言/附录类内容
+- 标题格式分析与标准化：统一章节编号、目录标题等格式
+- 自动术语表生成：按源语言分词/切词后提取高频术语，再由 AI 筛选
+- 批处理、重试和单节点回退，提升长文翻译稳定性
+- 断点续传：章节级缓存，重跑时自动复用已完成结果
+- 提取阶段内容过滤：在进入翻译前丢弃明显 OCR 噪声，并为明显伪表格插入占位符
+- 翻译完成后自动同步 EPUB HTML TOC 和 NCX 导航
 
 ## 目录结构
 
-```
-epub-translator/
-├── index.js                # CLI 入口，负责参数解析与输入分流
+```text
+wasabi_epub/
+├── index.js
 ├── src/
-    ├── core.js             # EPUB / HTML 主流程编排
-    ├── config.js           # Provider 选择、翻译风格配置
-    ├── chapterSelection.js # 命令行章节选择器（--chap）
-    ├── logger.js           # 运行日志模块
-    ├── aiProvider.js       # AI Provider 工厂（Gemini / OpenAI 兼容接口）
-    ├── cache.js            # 断点续传缓存
-    ├── utils.js            # 通用工具（HTML 加载、AI 响应清洗、href 索引等）
-    ├── batchQueue.js       # 批处理队列与通用批处理逻辑
-    ├── agent.js            # 章节规划 Agent
-    ├── headings.js         # 标题格式分析与标准化
-    ├── glossary.js         # 术语表生成
-    ├── translator.js       # 章节翻译
-    ├── tocSync.js          # HTML TOC 与 NCX 目录同步
-    └── epubSaver.js        # EPUB 文件写入
-└── prompts/
-    └── epub_translation_prompt.txt # EPUB 正文翻译提示词模板
+│   ├── core.js
+│   ├── config.js
+│   ├── utils.js
+│   ├── agent.js
+│   ├── content/
+│   │   ├── content-classifier.js
+│   │   ├── glossary.js
+│   │   └── headings.js
+│   ├── epub/
+│   │   ├── epubSaver.js
+│   │   └── tocSync.js
+│   ├── support/
+│   │   ├── cache.js
+│   │   ├── chapterSelection.js
+│   │   └── logger.js
+│   └── translation/
+│       ├── aiProvider.js
+│       ├── batchQueue.js
+│       └── translator.js
+├── prompts/
+│   └── epub_translation_prompt.txt
+├── input/
+├── output/
+└── log/
 ```
 
----
+主要模块：
+
+- `index.js`：CLI 入口，解析参数并分流到 EPUB / HTML 流程
+- `src/core.js`：主流程编排，负责输入、缓存、标题规则、术语表、翻译、保存
+- `src/translation/translator.js`：节点收集、翻译批处理、重试和结果回写
+- `src/content/content-classifier.js`：提取阶段分类器，过滤 OCR 噪声、伪表格和公式样内容
+- `src/content/glossary.js`：按源语言做术语提取与 AI 筛选
+- `src/content/headings.js`：标题格式分析与全书标准化
 
 ## 环境要求
 
-- Node.js >= 18
+- Node.js 18+
 - npm
 
-### 依赖安装
+安装依赖：
 
 ```bash
 npm install
 ```
 
----
-
 ## 配置
 
-### 1. 环境变量
+在项目根目录创建 `.env`。
 
-在项目根目录创建 `.env` 文件。现在主模型、fallback 模型、以及俄语 glossary 专用模型都可以直接在 `.env` 中配置：
+示例：
 
 ```env
-# 主流程使用的 provider / model
+# 主 provider / model
 PRIMARY_PROVIDER=qwen
 PRIMARY_MODEL=qwen-plus
 
-# 命中内容策略时的 fallback
+# 内容策略命中时的 fallback
 FALLBACK_ON_CONTENT_POLICY=true
 FALLBACK_PROVIDER=openrouter
 FALLBACK_MODEL=x-ai/grok-4.1-fast
@@ -87,131 +98,210 @@ QWEN_API_KEY=your_qwen_api_key
 MIMO_API_KEY=your_mimo_api_key
 OPENROUTER_API_KEY=your_openrouter_api_key
 
-# 可选：直接指定某个 provider 的默认模型
-# OPENROUTER_MODEL=anthropic/claude-sonnet-4.5
+# 可选：覆盖 provider 默认模型
+# OPENROUTER_MODEL=google/gemini-2.5-pro
 
 # 可选：自定义 base URL
+# QWEN_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
+# MIMO_BASE_URL=https://api.xiaomimimo.com/v1
 # OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
+
+# 可选：OpenRouter reasoning 开关
+# OPENROUTER_REASONING_ENABLED=true
 ```
 
-OpenRouter 的模型名直接写它的平台标识即可，例如：
+说明：
 
-- `OPENROUTER_MODEL=x-ai/grok-4.1-fast`
-- `OPENROUTER_MODEL=mistralai/mistral-small-3.1-24b-instruct`
-- `OPENROUTER_MODEL=google/gemini-2.5-pro`
+- `PRIMARY_PROVIDER` 默认是 `qwen`
+- `FALLBACK_PROVIDER` 默认是 `openrouter`
+- 默认源语言是 `English`
+- 默认目标语言是 `Chinese (Simplified)`
+- `--concurrency` 会覆盖所有 provider 的运行时并发设置
+- 如果 glossary 专用 provider 没有可用 API key，会自动回退到主 provider，不会中断任务
 
-如果你给俄语或日语 glossary 单独指定了 OpenRouter 模型，但没有配置 `OPENROUTER_API_KEY`，脚本会自动回落到主模型，不会因为 glossary 专用配置缺失而中断。
+如需调整翻译风格，可编辑：
 
-并发通过命令行参数控制，例如 `--concurrency 5`。
+- `src/config.js` 中的 `buildStyleGuide()`
+- `prompts/epub_translation_prompt.txt`
 
-### 2. 可选：自定义翻译风格
+## CLI 用法
 
-修改 `src/config.js` 中的 `buildStyleGuide()`，或编辑 `prompts/epub_translation_prompt.txt`，可调整译文风格要求和正文翻译提示词。
-当前脚本默认源语言为英文；如需切换，可使用 `--from`。
-
----
-
-## 使用方法
-
-### 基本运行
-
-将 EPUB 或 HTML 文件放置在项目根目录，然后执行：
+基本格式：
 
 ```bash
-node index.js "your-book.epub"
-node index.js "your-book.epub" --debug
-node index.js "your-book.epub" --to "fr"
-node index.js "your-book.epub" --from "es" --to "zh"
-node index.js "your-book.epub" --from "zh" --to "en"
-node index.js "your-book.epub" --from "ja" --to "zh"
-node index.js "your-book.epub" --from "ko" --to "zh"
-node index.js "your-book.epub" --concurrency 5
+node index.js "your-book.epub|your-file.html" [--chap "<selector>"] [--from "<lang>"] [--to "<lang>"] [--concurrency <n>] [--debug]
+```
+
+示例：
+
+```bash
+node index.js "book.epub"
+node index.js "book.epub" --debug
+node index.js "book.epub" --to "fr"
+node index.js "book.epub" --from "es" --to "zh"
+node index.js "book.epub" --from "ja" --to "zh"
+node index.js "book.epub" --from "ko" --to "zh"
+node index.js "book.epub" --concurrency 5
+node index.js "book.epub" --chap "1,3,5"
+node index.js "book.epub" --chap "1-3"
+node index.js "book.epub" --chap "'Blackhole'-'Gravity'"
 node index.js "chapter.html" --to "zh"
 node index.js "chapter.htm" --from "en" --to "fr"
 ```
 
-如果只想翻译指定章节，可使用 `--chap`：
+参数说明：
 
-```bash
-node index.js "your-book.epub" --chap "1,3,5"
-node index.js "your-book.epub" --chap "1-3"
-node index.js "your-book.epub" --chap "1,1-3"
-node index.js "your-book.epub" --chap "'Blackhole'-'Gravity'"
-```
+- `--chap`：只翻译指定章节，仅 EPUB 支持
+- `--from`：设置源语言
+- `--to`：设置目标语言
+- `--concurrency`：设置本次运行并发数，必须为正整数
+- `--debug`：保留缓存目录和日志文件，便于排错
 
-支持的选择格式：
+支持的常用语言别名：
 
-- `1`：第 1 章
-- `1-3`：第 1 到第 3 章（含两端）
+- 源语言：`en` `es` `fr` `ru` `zh` `ja` `jp` `ko`
+- 目标语言：`en` `es` `fr` `ru` `zh` `ja` `jp` `ko`
+
+内部会解析为：
+
+- `English`
+- `Spanish`
+- `French`
+- `Russian`
+- `Chinese (Simplified)`
+- `Japanese`
+- `Korean`
+
+### 章节选择语法
+
+`--chap` 支持：
+
+- `1`：单章
+- `1-3`：闭区间范围
 - `1,3,5`：离散章节
-- `'Blackhole'-'Gravity'`：按章节标题匹配起止范围（含两端，标题需精确匹配）
-- `--from`：设置源语言，当前先支持 `en`、`es`、`fr`、`ru`、`zh`、`ja`、`ko`
-- `--to`：设置目标语言，例如 `en`、`es`、`fr`、`zh`、`ru`、`ko`、`ja`
-- `--concurrency`：设置本次运行的并发数，例如 `--concurrency 5`
-- `--debug`：保留本次运行生成的 `cache` 和 `log`
-- `--chap`：仅 EPUB 输入支持
+- `1,1-3`：混合选择
+- `'Blackhole'-'Gravity'`：按章节标题精确匹配起止范围
 
-翻译完成后，输出文件将出现在项目根目录，文件名格式为：
+## 输入、输出与缓存
 
-```
-原文件名_语言短码.epub
-原文件名_语言短码.html
-```
+输入文件可以放在：
 
-使用 `--chap` 时，输出文件名会附带章节选择后缀，格式类似 `原文件名_chap-1-3_zh.epub`，避免覆盖整本翻译结果。
-输入文件在任务完成后会被移动到 `input/`，输出文件会保存到 `output/`。
+- 项目根目录
+- `input/` 目录
 
-### 断点续传
+运行成功后：
 
-翻译过程中如果中断，重新运行相同命令即可自动跳过已完成内容，从中断处继续。整本 EPUB、`--chap` 选择翻译、以及单 HTML 翻译会使用各自缓存目录，互不干扰。
-默认运行结束后会清理 `cache` 和 `log`；只有加上 `--debug` 才会保留这些调试产物。
+- 输入文件会被移动到 `input/`
+- 输出文件会写入 `output/`
 
-如需强制重新翻译全书，手动删除对应缓存目录（例如 `.cache_your-book/`）后再运行：
+输出命名规则：
 
-```bash
-node index.js "your-book.epub"
+```text
+book_zh.epub
+book_fr.epub
+chapter_zh.html
 ```
 
-## 翻译流程说明
+如果使用 `--chap`，输出文件会带章节选择后缀，例如：
+
+```text
+book_chap-1-3_zh.epub
+```
+
+缓存目录规则：
+
+- 整本 EPUB：`.cache_<文件名>/`
+- 指定章节 EPUB：`.cache_<文件名>_chap-<selector>/`
+- 单 HTML：`.cache_<文件名>_html/`
+
+默认情况下任务结束后会清理缓存和日志。加上 `--debug` 后会保留：
+
+- 缓存目录
+- `log/` 下的运行日志
+
+## 翻译流程
 
 ### EPUB 模式
 
-```
-Step 1  章节规划      AI Agent 分析章节列表，识别目录页，排定翻译顺序
-Step 2  标题分析      收集全书标题样本，生成格式转换规范（如章节编号格式）
-Step 3  术语表生成    N-gram 提取高频词组 → AI 筛选 → 生成术语对照表
-Step 4  正文翻译      按规划顺序逐章翻译，使用术语表保证一致性，结果写入缓存
-Step 5  标题标准化    对全书已翻译标题统一应用 Step 2 的格式规范
-Step 6  同步 HTML TOC 将目录页中的链接文本更新为对应章节的中文标题
-Step 7  同步 NCX      更新 EPUB 导航元数据（.ncx 文件）中的标题
-Step 8  保存输出      将所有修改写回 EPUB 压缩包并输出
+```text
+Step 1  章节规划        AI 分析章节列表，识别 TOC，生成翻译顺序
+Step 2  标题分析        收集标题样本，生成标题格式规则
+Step 3  术语表生成      提取高频词组并由 AI 筛选
+Step 4  正文翻译        提取节点 -> 分类过滤 -> 分批翻译 -> 失败重试 -> 写入缓存
+Step 5  标题标准化      应用标题格式规则
+Step 6  TOC 同步        更新 HTML TOC 链接文字
+Step 7  NCX 同步        更新 EPUB 导航元数据
+Step 8  保存输出        写回 EPUB 并输出到 output/
 ```
 
 ### HTML 模式
 
-```
-Step 1  标题分析      收集文档标题样本，生成格式转换规范
-Step 2  术语表生成    N-gram 提取高频词组 → AI 筛选 → 生成术语对照表
-Step 3  正文翻译      翻译 HTML 中的正文节点，结果写入缓存
-Step 4  标题标准化    对已翻译标题统一应用 Step 1 的格式规范
-Step 5  保存输出      将翻译后的 HTML 写出到 output/
+```text
+Step 1  标题分析        收集标题样本，生成格式规则
+Step 2  术语表生成      提取术语并由 AI 筛选
+Step 3  正文翻译        提取节点 -> 分类过滤 -> 分批翻译 -> 写入缓存
+Step 4  标题标准化      应用标题规则
+Step 5  保存输出        写出到 output/
 ```
 
----
+## 提取阶段内容过滤
+
+节点在进入翻译前会先经过 `src/content/content-classifier.js`。
+
+当前处理策略：
+
+- 保留正常文本节点
+- 丢弃明显 OCR 噪声，例如极短碎片、替换字符 `�`、主要由符号构成的无意义片段、脱离上下文的数字碎片
+- 识别明显 caption 标签样文本
+- 对明显伪表格插入简单占位符，而不是送去翻译
+- 对公式样内容保留占位思路，避免污染翻译上下文
+
+伪表格检测是保守策略，只针对明显的 OCR / ASCII / 像素网格类表格，尽量不误伤真实数据表。
+
+被过滤节点会记录简要日志，格式包含：
+
+```json
+{
+  "id": "node_12",
+  "type": "TABLE_PSEUDO",
+  "action": "PLACEHOLDER",
+  "reason": "image_like_table",
+  "preview": "0 # 0 o ..."
+}
+```
+
+## 术语表与语言处理
+
+术语提取会根据源语言采用不同分词方案：
+
+- 英语 / 西语 / 法语：基于 `natural`
+- 中文：`jieba-wasm`
+- 日语：`kuromoji`
+- 韩语：`oktjs`
+- 俄语：西里尔字母规则 + N-gram
+
+俄语和日语支持单独的 glossary provider / model 配置，用于术语筛选质量优化。
 
 ## 日志
 
-每次运行在 `log/` 目录生成一个日志文件，命名格式为 `translation_YYYY-MM-DDTHH-MM-SS.log`，记录内容包括：
+每次运行会在 `log/` 下创建独立日志文件，格式类似：
 
-- 每次 AI 请求的 system prompt 和 user content
-- AI 返回的原始响应
-- 所有警告（如节点回写失败）和错误信息
-- 生成的术语表和标题格式样本
+```text
+translation_YYYY-MM-DDTHH-MM-SS.log
+```
 
----
+日志会记录：
+
+- AI 请求与响应
+- 批处理失败、重试、回退信息
+- 术语表和标题规则生成信息
+- 内容过滤跳过记录
+- 主流程错误信息
 
 ## 注意事项
 
-- 翻译质量依赖所选模型能力，建议使用 `qwen3-max` 或 `gemini-2.5-pro`
-- 单次运行的 API 费用与书籍篇幅和所选模型定价有关，建议先用 `--chap "1-3"` 这类小范围选择做测试
-- 目录同步依赖章节内存在可识别的标题标签（`h1`～`h3`），结构不规范的 EPUB 可能无法完整同步
+- 翻译质量高度依赖所选模型
+- 长书翻译成本较高，建议先用 `--chap` 小范围试跑
+- TOC 同步依赖章节内存在可识别标题
+- `--chap` 只支持 EPUB，不支持 HTML
+- 如果需要强制重跑，删除对应 `.cache_*` 目录后重新执行

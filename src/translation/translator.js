@@ -1,6 +1,6 @@
-import { buildStyleGuide } from "./config.js";
+import { buildStyleGuide } from "../config.js";
 import fs from "fs";
-import { loadHtml } from "./utils.js";
+import { loadHtml } from "../utils.js";
 import {
     splitIntoBatches,
     dispatchBatches,
@@ -10,14 +10,13 @@ import path from "path";
 import { fileURLToPath } from "url";
 import {
     buildClassificationLog,
-    buildPlaceholderMarkup,
     classifyNode,
-} from "./core/content-classifier.js";
+} from "../content/content-classifier.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const TRANSLATION_PROMPT_TEMPLATE = fs.readFileSync(
-    path.resolve(__dirname, "../prompts/epub_translation_prompt.txt"),
+    path.resolve(__dirname, "../../prompts/epub_translation_prompt.txt"),
     "utf8",
 );
 
@@ -36,9 +35,51 @@ const unwrapUselessSpans = ($, referencedIds, definedClasses) => {
     });
 };
 
-const logClassification = (logger, payload) => {
+const logClassification = (logger, payload, debugMode = false) => {
     logger.write("INFO", `Content Filter: ${JSON.stringify(payload)}`);
+    if (debugMode) {
+        console.log(`    - 🧹 Filtered: ${JSON.stringify(payload)}`);
+    }
 };
+
+const previewMarkup = (html, maxLength = 160) => {
+    const normalized = String(html ?? "").replace(/\s+/g, " ").trim();
+    if (normalized.length <= maxLength) return normalized;
+    return `${normalized.slice(0, maxLength)}...`;
+};
+
+const buildDomPath = ($, el) => {
+    const parts = [];
+    let current = el;
+    while (current && current.type === "tag") {
+        const $current = $(current);
+        const tagName = current.name || "node";
+        const id = $current.attr("id");
+        const className = ($current.attr("class") || "")
+            .split(/\s+/)
+            .filter(Boolean)
+            .slice(0, 2)
+            .join(".");
+        const siblingIndex =
+            $current.prevAll(tagName).length + 1;
+
+        let segment = tagName;
+        if (id) segment += `#${id}`;
+        else if (className) segment += `.${className}`;
+        segment += `:nth-of-type(${siblingIndex})`;
+        parts.unshift(segment);
+        current = current.parent;
+    }
+    return parts.join(" > ");
+};
+
+const enrichClassificationLog = ($, el, chapterTitle, logEntry, htmlContent) => ({
+    ...logEntry,
+    chapterTitle,
+    tagName: el.name,
+    domPath: buildDomPath($, el),
+    htmlPreview: previewMarkup(htmlContent),
+});
 
 /**
  * 把章节内所有 batch 塞进全局队列，返回一个 Promise。
@@ -53,6 +94,7 @@ const enqueueChapterTranslation = (
     logger,
     referencedIds,
     definedClasses,
+    debugMode = false,
 ) => {
     const $ = loadHtml(htmlContent);
 
@@ -75,17 +117,17 @@ const enqueueChapterTranslation = (
 
         if (classification.action !== "PLACEHOLDER") return;
 
-        const placeholder = buildPlaceholderMarkup(classification, "div");
-        if (!placeholder) return;
-
         const logEntry = buildClassificationLog(
             `table_${i}`,
             classification,
             $el.text(),
         );
         skippedNodeCount++;
-        logClassification(logger, logEntry);
-        $el.replaceWith(placeholder);
+        logClassification(
+            logger,
+            enrichClassificationLog($, el, chapterTitle, logEntry, $.html($el)),
+            debugMode,
+        );
     });
 
     const nodesToTranslate = [];
@@ -103,27 +145,43 @@ const enqueueChapterTranslation = (
 
         if (classification.action === "DROP") {
             skippedNodeCount++;
+            const logEntry = buildClassificationLog(
+                nodeId,
+                classification,
+                $el.text(),
+            );
             logClassification(
                 logger,
-                buildClassificationLog(nodeId, classification, $el.text()),
+                enrichClassificationLog(
+                    $,
+                    el,
+                    chapterTitle,
+                    logEntry,
+                    $.html($el),
+                ),
+                debugMode,
             );
-            $el.remove();
             return;
         }
 
         if (classification.action === "PLACEHOLDER") {
-            const placeholder = buildPlaceholderMarkup(
-                classification,
-                el.name || "span",
-            );
             skippedNodeCount++;
+            const logEntry = buildClassificationLog(
+                nodeId,
+                classification,
+                $el.text(),
+            );
             logClassification(
                 logger,
-                buildClassificationLog(nodeId, classification, $el.text()),
+                enrichClassificationLog(
+                    $,
+                    el,
+                    chapterTitle,
+                    logEntry,
+                    $.html($el),
+                ),
+                debugMode,
             );
-            if (placeholder) {
-                $el.replaceWith(placeholder);
-            }
             return;
         }
 
@@ -232,9 +290,9 @@ const enqueueChapterTranslation = (
     // 返回整个异步链，但 enqueue 动作是立即发生的（不等 await）
     return runRound(nodesToTranslate, chapterTitle).then(() => {
         $("[data-t-id]").removeAttr("data-t-id");
-        if (skippedNodeCount > 0) {
+        if (debugMode && skippedNodeCount > 0) {
             console.log(
-                `    - 🧹 Filtered ${skippedNodeCount} node(s) before translation.`,
+                `    - ⏭️ Skipped translation for ${skippedNodeCount} classified node(s); original content preserved.`,
             );
         }
         return $.xml();
@@ -252,6 +310,7 @@ export const translateHtmlContent = async (
     logger,
     referencedIds = new Set(),
     definedClasses = new Set(),
+    debugMode = false,
 ) => {
     return enqueueChapterTranslation(
         htmlContent,
@@ -262,6 +321,7 @@ export const translateHtmlContent = async (
         logger,
         referencedIds,
         definedClasses,
+        debugMode,
     );
 };
 
@@ -277,6 +337,7 @@ export const performTranslation = async (
     cache,
     referencedIds = new Set(),
     definedClasses = new Set(),
+    debugMode = false,
 ) => {
     console.log("\n✍️ Step 4: Translating Book Content...");
     let skipped = 0;
@@ -312,6 +373,7 @@ export const performTranslation = async (
             logger,
             referencedIds,
             definedClasses,
+            debugMode,
         );
 
         // 每章独立 then：完成后立即写 cache，不等其他章节

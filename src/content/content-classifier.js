@@ -4,7 +4,11 @@ const BROKEN_OCR_REGEX =
     /^([A-Za-z]\s+[A-Za-z][\-.,:]?|[.\-_:]{3,}[A-Za-z]?|[A-Za-z]?[.\-_:]{3,})$/;
 const WORD_REGEX = /[A-Za-z]{3,}/g;
 const FORMULA_HINT_REGEX =
-    /(?:=|≈|≤|≥|∑|∫|√|×|÷|\b(?:sin|cos|tan|log|ln|max|min)\b)/i;
+    /(?:[=≈≤≥∑∫√^×÷]|\b(?:sin|cos|tan|log|ln)\b|[A-Za-z0-9]\s*[*]\s*[A-Za-z0-9])/;
+
+const NON_TEXT_CONTENT_REGEX =
+    /<(?:img|svg|picture|source|canvas|video|audio|iframe|embed|object|math)\b/i;
+const TABLE_MATH_MARKUP_REGEX = /<(?:math|svg|img|mjx-container)\b/i;
 
 const countMatches = (text, regex) => (text.match(regex) || []).length;
 
@@ -60,9 +64,9 @@ export const classifyTextNode = (text) => {
 
     if (/^\d+(?:[.,:/-]\d+)*$/.test(normalized)) {
         return {
-            type: "TEXT_NOISE",
-            action: "DROP",
-            reason: "numeric_fragment",
+            type: "TEXT_NUMERIC",
+            action: "KEEP",
+            reason: "numeric_only",
         };
     }
 
@@ -71,6 +75,34 @@ export const classifyTextNode = (text) => {
             type: "TEXT_NOISE",
             action: "DROP",
             reason: "broken_ocr_fragment",
+        };
+    }
+
+    if (
+        FORMULA_HINT_REGEX.test(normalized) &&
+        alphaCount + digitCount > 0 &&
+        symbolCount >= 2 &&
+        wordMatches.length <= 2
+    ) {
+        return {
+            type: "FORMULA",
+            action: "SKIP",
+            reason: "formula_like_text",
+        };
+    }
+
+    // Quantum / bra-ket notation
+    if (
+        (
+            /\|[^|]+⟩/.test(normalized) ||
+            /⟨[^⟩]+\|/.test(normalized)
+        ) &&
+        /[=]/.test(normalized)  // 有等式结构
+    ) {
+        return {
+            type: "FORMULA",
+            action: "SKIP",
+            reason: "quantum_notation",
         };
     }
 
@@ -84,19 +116,6 @@ export const classifyTextNode = (text) => {
             type: "TEXT_NOISE",
             action: "DROP",
             reason: "mostly_symbols",
-        };
-    }
-
-    if (
-        FORMULA_HINT_REGEX.test(normalized) &&
-        alphaCount + digitCount > 0 &&
-        symbolCount >= 2 &&
-        wordMatches.length <= 2
-    ) {
-        return {
-            type: "FORMULA",
-            action: "PLACEHOLDER",
-            reason: "formula_like_text",
         };
     }
 
@@ -116,12 +135,20 @@ export const classifyTextNode = (text) => {
     return { type: "TEXT_NORMAL", action: "KEEP", reason: "default_keep" };
 };
 
+const hasNonTextContent = (html) =>
+    NON_TEXT_CONTENT_REGEX.test(String(html ?? ""));
+
+const hasMathLikeTableMarkup = (html) =>
+    TABLE_MATH_MARKUP_REGEX.test(String(html ?? ""));
+
 export const isPseudoTable = (node) => {
+    const html = String(node?.html || "");
     const cellTexts = Array.isArray(node?.cellTexts)
         ? node.cellTexts.map((cell) => normalizeText(cell))
         : [];
 
     if (cellTexts.length < 12) return false;
+    if (hasMathLikeTableMarkup(html)) return false;
 
     const nonEmptyCells = cellTexts.filter(Boolean);
     if (nonEmptyCells.length === 0) return false;
@@ -138,17 +165,20 @@ export const isPseudoTable = (node) => {
     const wordCells =
         nonEmptyCells.filter((cell) => /[A-Za-z]{3,}/.test(cell)).length /
         nonEmptyCells.length;
+    const formulaCells =
+        nonEmptyCells.filter(
+            (cell) => classifyTextNode(cell).type === "FORMULA",
+        ).length / nonEmptyCells.length;
     const noiseCells =
         nonEmptyCells.filter((cell) => {
             const result = classifyTextNode(cell);
-            return (
-                result.type === "TEXT_NOISE" ||
-                (result.type !== "TEXT_NORMAL" && result.action !== "KEEP")
-            );
+            return result.type === "TEXT_NOISE";
         }).length / nonEmptyCells.length;
 
     const joined = nonEmptyCells.join("");
     const distinctChars = new Set(joined.split("")).size;
+
+    if (formulaCells >= 0.25) return false;
 
     return (
         shortCells >= 0.9 &&
@@ -161,6 +191,7 @@ export const isPseudoTable = (node) => {
 
 export const classifyNode = (node) => {
     const tagName = String(node?.tagName || "").toLowerCase();
+    const html = String(node?.html || "");
 
     if (tagName === "table") {
         if (isPseudoTable(node)) {
@@ -183,6 +214,22 @@ export const classifyNode = (node) => {
             };
         }
         return { type: "CAPTION", action: "KEEP", reason: "caption_keep" };
+    }
+
+    if (/equation/i.test(node?.className || "")) {
+        return {
+            type: "FORMULA",
+            action: "SKIP",
+            reason: "equation_class",
+        };
+    }
+
+    if (hasNonTextContent(html)) {
+        return {
+            type: "NON_TEXT_CONTENT",
+            action: "KEEP",
+            reason: "embedded_non_text_content",
+        };
     }
 
     return classifyTextNode(node?.text || "");

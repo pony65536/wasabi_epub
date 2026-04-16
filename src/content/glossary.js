@@ -7,8 +7,7 @@ import {
 } from "oktjs";
 import path from "path";
 import { fileURLToPath } from "url";
-import { callAIWithRetry } from "./utils.js";
-import { loadHtml } from "./utils.js";
+import { callAIWithRetry, loadHtml } from "../utils.js";
 
 const { NGrams, WordTokenizer } = pkg;
 const __filename = fileURLToPath(import.meta.url);
@@ -58,7 +57,12 @@ const getJapaneseTokenizer = async () => {
 
     japaneseTokenizerPromise = new Promise((resolve, reject) => {
         kuromoji
-            .builder({ dicPath: path.resolve(__dirname, "../node_modules/kuromoji/dict") })
+            .builder({
+                dicPath: path.resolve(
+                    __dirname,
+                    "../../node_modules/kuromoji/dict",
+                ),
+            })
             .build((err, tokenizer) => {
                 if (err) reject(err);
                 else resolve(tokenizer);

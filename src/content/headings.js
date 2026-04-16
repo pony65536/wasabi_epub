@@ -1,7 +1,11 @@
 import Queue from "better-queue";
 import * as cheerio from "cheerio";
-import { loadHtml, cleanAIResponse, callAIWithRetry } from "./utils.js";
-import { splitIntoBatches } from "./batchQueue.js";
+import {
+    loadHtml,
+    cleanAIResponse,
+    callAIWithRetry,
+} from "../utils.js";
+import { splitIntoBatches } from "../translation/batchQueue.js";
 
 export const HEADING_SELECTORS = "h1, h2, h3, h4, h5, h6";
 

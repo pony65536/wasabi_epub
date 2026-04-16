@@ -3,7 +3,7 @@ import {
     normalizeHref,
     buildHrefIndex,
     resolveAnchorTitle,
-} from "./utils.js";
+} from "../utils.js";
 
 // =================== 共用工具 ===================
 const findBySrc = (hrefIndex, src) => {
