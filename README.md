@@ -1,6 +1,6 @@
-# EPUB 自动翻译工具
+# EPUB / HTML 自动翻译工具
 
-将英文 EPUB 电子书自动翻译为简体中文，保留原书排版结构、目录导航和标题格式。
+将英文 EPUB 电子书或 HTML 文档自动翻译为目标语言，尽量保留原有排版结构；EPUB 模式还会同步目录导航和标题格式。
 
 ---
 
@@ -12,6 +12,7 @@
 - **自动术语表**：使用 N-gram 算法提取高频词组，经 AI 筛选生成术语表，确保专业词汇全书译法一致
 - **批处理 + 并发**：HTML 节点分批并发发送，支持单批失败自动重试（最多 3 轮）
 - **断点续传**：每章翻译完成后写入磁盘缓存，中断后重启自动跳过已完成章节
+- **HTML 单文件翻译**：支持直接输入 `.html/.htm` 文档并输出翻译后的 HTML 文件
 - **目录同步**：翻译完成后自动将 HTML TOC 页面与 NCX 导航元数据更新为中文标题
 - **日志记录**：每次运行生成独立日志文件，记录所有 AI 请求、响应及错误信息
 
@@ -21,8 +22,9 @@
 
 ```
 epub-translator/
-├── index.js                # 主入口，负责流程编排
+├── index.js                # CLI 入口，负责参数解析与输入分流
 ├── src/
+    ├── core.js             # EPUB / HTML 主流程编排
     ├── config.js           # Provider 选择、翻译风格配置
     ├── chapterSelection.js # 命令行章节选择器（--chap）
     ├── logger.js           # 运行日志模块
@@ -113,7 +115,7 @@ OpenRouter 的模型名直接写它的平台标识即可，例如：
 
 ### 基本运行
 
-将 EPUB 文件放置在项目根目录，然后执行：
+将 EPUB 或 HTML 文件放置在项目根目录，然后执行：
 
 ```bash
 node index.js "your-book.epub"
@@ -124,6 +126,8 @@ node index.js "your-book.epub" --from "zh" --to "en"
 node index.js "your-book.epub" --from "ja" --to "zh"
 node index.js "your-book.epub" --from "ko" --to "zh"
 node index.js "your-book.epub" --concurrency 5
+node index.js "chapter.html" --to "zh"
+node index.js "chapter.htm" --from "en" --to "fr"
 ```
 
 如果只想翻译指定章节，可使用 `--chap`：
@@ -145,11 +149,13 @@ node index.js "your-book.epub" --chap "'Blackhole'-'Gravity'"
 - `--to`：设置目标语言，例如 `en`、`es`、`fr`、`zh`、`ru`、`ko`、`ja`
 - `--concurrency`：设置本次运行的并发数，例如 `--concurrency 5`
 - `--debug`：保留本次运行生成的 `cache` 和 `log`
+- `--chap`：仅 EPUB 输入支持
 
 翻译完成后，输出文件将出现在项目根目录，文件名格式为：
 
 ```
 原文件名_语言短码.epub
+原文件名_语言短码.html
 ```
 
 使用 `--chap` 时，输出文件名会附带章节选择后缀，格式类似 `原文件名_chap-1-3_zh.epub`，避免覆盖整本翻译结果。
@@ -157,7 +163,7 @@ node index.js "your-book.epub" --chap "'Blackhole'-'Gravity'"
 
 ### 断点续传
 
-翻译过程中如果中断，重新运行相同命令即可自动跳过已完成的章节，从中断处继续。整本翻译与 `--chap` 选择翻译会使用不同缓存目录，互不干扰。
+翻译过程中如果中断，重新运行相同命令即可自动跳过已完成内容，从中断处继续。整本 EPUB、`--chap` 选择翻译、以及单 HTML 翻译会使用各自缓存目录，互不干扰。
 默认运行结束后会清理 `cache` 和 `log`；只有加上 `--debug` 才会保留这些调试产物。
 
 如需强制重新翻译全书，手动删除对应缓存目录（例如 `.cache_your-book/`）后再运行：
@@ -168,6 +174,8 @@ node index.js "your-book.epub"
 
 ## 翻译流程说明
 
+### EPUB 模式
+
 ```
 Step 1  章节规划      AI Agent 分析章节列表，识别目录页，排定翻译顺序
 Step 2  标题分析      收集全书标题样本，生成格式转换规范（如章节编号格式）
@@ -177,6 +185,16 @@ Step 5  标题标准化    对全书已翻译标题统一应用 Step 2 的格式
 Step 6  同步 HTML TOC 将目录页中的链接文本更新为对应章节的中文标题
 Step 7  同步 NCX      更新 EPUB 导航元数据（.ncx 文件）中的标题
 Step 8  保存输出      将所有修改写回 EPUB 压缩包并输出
+```
+
+### HTML 模式
+
+```
+Step 1  标题分析      收集文档标题样本，生成格式转换规范
+Step 2  术语表生成    N-gram 提取高频词组 → AI 筛选 → 生成术语对照表
+Step 3  正文翻译      翻译 HTML 中的正文节点，结果写入缓存
+Step 4  标题标准化    对已翻译标题统一应用 Step 1 的格式规范
+Step 5  保存输出      将翻译后的 HTML 写出到 output/
 ```
 
 ---

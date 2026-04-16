@@ -87,6 +87,35 @@ export const CONFIG = {
     },
 };
 
+export const createRuntimeConfig = ({
+    sourceLanguage = DEFAULT_SOURCE_LANGUAGE,
+    targetLanguage = DEFAULT_TARGET_LANGUAGE,
+    concurrency = null,
+} = {}) => {
+    const runtimeConfig = {
+        ...CONFIG,
+        sourceLanguage,
+        targetLanguage,
+        gemini: { ...CONFIG.gemini },
+        qwen: { ...CONFIG.qwen },
+        mimo: { ...CONFIG.mimo },
+        openrouter: {
+            ...CONFIG.openrouter,
+            requestOptions: {
+                ...(CONFIG.openrouter.requestOptions || {}),
+            },
+        },
+    };
+
+    if (concurrency) {
+        for (const providerName of ["gemini", "qwen", "mimo", "openrouter"]) {
+            runtimeConfig[providerName].concurrency = concurrency;
+        }
+    }
+
+    return runtimeConfig;
+};
+
 export const buildStyleGuide = (targetLanguage) => `
 TRANSLATION STYLE GUIDE (Target: ${targetLanguage}):
 1. **Write Natural ${targetLanguage}**: Prefer clear, accurate, fluent modern language over mechanical source-like syntax.

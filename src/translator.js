@@ -1,4 +1,4 @@
-import { CONFIG, buildStyleGuide } from "./config.js";
+import { buildStyleGuide } from "./config.js";
 import fs from "fs";
 import { loadHtml } from "./utils.js";
 import {
@@ -39,6 +39,7 @@ const enqueueChapterTranslation = (
     htmlContent,
     chapterTitle,
     glossary,
+    translationConfig,
     batchQueue,
     logger,
     referencedIds,
@@ -82,13 +83,13 @@ const enqueueChapterTranslation = (
                     : "";
             return TRANSLATION_PROMPT_TEMPLATE.replace(
                 "{{TARGET_LANGUAGE}}",
-                CONFIG.targetLanguage,
+                translationConfig.targetLanguage,
             )
                 .replace("{{CHAPTER_TITLE}}", chapterTitle)
                 .replace("{{GLOSSARY_BLOCK}}", glossaryMarkdown)
                 .replace(
                     "{{STYLE_GUIDE}}",
-                    buildStyleGuide(CONFIG.targetLanguage),
+                    buildStyleGuide(translationConfig.targetLanguage),
                 )
                 .trim();
         },
@@ -169,6 +170,7 @@ export const translateHtmlContent = async (
     htmlContent,
     chapterTitle,
     glossary,
+    translationConfig,
     aiProvider,
     batchQueue,
     logger,
@@ -179,6 +181,7 @@ export const translateHtmlContent = async (
         htmlContent,
         chapterTitle,
         glossary,
+        translationConfig,
         batchQueue,
         logger,
         referencedIds,
@@ -191,6 +194,7 @@ export const performTranslation = async (
     sortedChapters,
     chapterMap,
     glossary,
+    translationConfig,
     aiProvider,
     batchQueue,
     logger,
@@ -227,6 +231,7 @@ export const performTranslation = async (
             ch.html,
             ch.title,
             glossary,
+            translationConfig,
             batchQueue,
             logger,
             referencedIds,

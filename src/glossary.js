@@ -9,7 +9,6 @@ import path from "path";
 import { fileURLToPath } from "url";
 import { callAIWithRetry } from "./utils.js";
 import { loadHtml } from "./utils.js";
-import { CONFIG } from "./config.js";
 
 const { NGrams, WordTokenizer } = pkg;
 const __filename = fileURLToPath(import.meta.url);
@@ -36,15 +35,18 @@ const STOP_WORDS_BY_LANGUAGE = {
         /^(и|в|во|на|с|со|к|ко|по|о|об|от|до|из|у|за|для|не|но|а|что|как|это|то|же|ли|да|ну|он|она|оно|они|мы|вы|я|ты|его|ее|её|их|мне|меня|тебе|тебя|себя|нам|нас|вам|вас|был|была|были|быть|есть|нет|все|всё|весь|вся|всех|только|уже|даже|или|если|когда|потом|здесь|там|кто|чем|чтобы)$/i,
 };
 
-const getStopWordsPattern = () =>
-    STOP_WORDS_BY_LANGUAGE[CONFIG.sourceLanguage.toLowerCase()] ??
+const getStopWordsPattern = (sourceLanguage) =>
+    STOP_WORDS_BY_LANGUAGE[sourceLanguage.toLowerCase()] ??
     STOP_WORDS_BY_LANGUAGE.english;
 
-const isRussianSource = () => CONFIG.sourceLanguage.toLowerCase() === "russian";
-const isChineseSource = () =>
-    CONFIG.sourceLanguage.toLowerCase() === "chinese (simplified)";
-const isJapaneseSource = () => CONFIG.sourceLanguage.toLowerCase() === "japanese";
-const isKoreanSource = () => CONFIG.sourceLanguage.toLowerCase() === "korean";
+const isRussianSource = (sourceLanguage) =>
+    sourceLanguage.toLowerCase() === "russian";
+const isChineseSource = (sourceLanguage) =>
+    sourceLanguage.toLowerCase() === "chinese (simplified)";
+const isJapaneseSource = (sourceLanguage) =>
+    sourceLanguage.toLowerCase() === "japanese";
+const isKoreanSource = (sourceLanguage) =>
+    sourceLanguage.toLowerCase() === "korean";
 
 let japaneseTokenizerPromise = null;
 let koreanTokenizerInitialized = false;
@@ -287,13 +289,13 @@ const tokenizeWordsByLanguage = async (
 };
 
 // =================== 候选词收集 ===================
-const collectCandidates = async (chapterMap) => {
+const collectCandidates = async (chapterMap, translationConfig) => {
     const tokenizer = new WordTokenizer();
-    const STOP_WORDS = getStopWordsPattern();
-    const russianMode = isRussianSource();
-    const chineseMode = isChineseSource();
-    const japaneseMode = isJapaneseSource();
-    const koreanMode = isKoreanSource();
+    const STOP_WORDS = getStopWordsPattern(translationConfig.sourceLanguage);
+    const russianMode = isRussianSource(translationConfig.sourceLanguage);
+    const chineseMode = isChineseSource(translationConfig.sourceLanguage);
+    const japaneseMode = isJapaneseSource(translationConfig.sourceLanguage);
+    const koreanMode = isKoreanSource(translationConfig.sourceLanguage);
     const languageFlags = { russianMode, chineseMode, japaneseMode, koreanMode };
 
     let fullText = "";
@@ -410,8 +412,8 @@ const collectCandidates = async (chapterMap) => {
 // =================== 分批请求 AI ===================
 const CANDIDATE_BATCH_SIZE = 100;
 
-const buildPrompt = (candidateBatch) => `\
-I am translating an ebook from ${CONFIG.sourceLanguage} into ${CONFIG.targetLanguage}. \
+const buildPrompt = (candidateBatch, translationConfig) => `\
+I am translating an ebook from ${translationConfig.sourceLanguage} into ${translationConfig.targetLanguage}. \
 The following is a list of candidate phrases pre-filtered using an n-gram algorithm.
 
 Please select phrases that are most likely to cause translation inconsistencies across \
@@ -449,9 +451,13 @@ If a candidate phrase cannot be given a reasonable translation, exclude it entir
 Here are the candidates:
 ${JSON.stringify(candidateBatch)}`;
 
-const queryGlossaryBatch = async (candidates, aiProvider, logger) => {
+const queryGlossaryBatch = async (
+    candidates,
+    aiProvider,
+    logger,
+    translationConfig,
+) => {
     const results = [];
-    const totalBatches = Math.ceil(candidates.length / CANDIDATE_BATCH_SIZE);
 
     for (let i = 0; i < candidates.length; i += CANDIDATE_BATCH_SIZE) {
         const batchIndex = Math.floor(i / CANDIDATE_BATCH_SIZE) + 1;
@@ -460,7 +466,7 @@ const queryGlossaryBatch = async (candidates, aiProvider, logger) => {
         try {
             const parsed = await callAIWithRetry(
                 aiProvider,
-                buildPrompt(batch),
+                buildPrompt(batch, translationConfig),
                 "You are a helpful assistant that outputs only JSON.",
             );
             const terms = parsed.glossary || [];
@@ -480,13 +486,17 @@ export const generateInitialGlossary = async (
     chapterMap,
     aiProvider,
     logger,
+    translationConfig,
 ) => {
     console.log("\n📊 Step 3: Generating Initial Glossary...");
     const glossary = {};
 
     try {
         console.log("    - Reading and cleaning book content...");
-        const { candidates } = await collectCandidates(chapterMap);
+        const { candidates } = await collectCandidates(
+            chapterMap,
+            translationConfig,
+        );
         console.log(`    - Collected ${candidates.length} candidate terms.`);
 
         console.log("    - Sending candidates to AI in batches...");
@@ -494,6 +504,7 @@ export const generateInitialGlossary = async (
             candidates,
             aiProvider,
             logger,
+            translationConfig,
         );
 
         // 去重合并：同一 term 出现多次时保留第一个
