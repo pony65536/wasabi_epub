@@ -8,6 +8,11 @@ import {
 } from "./batchQueue.js";
 import path from "path";
 import { fileURLToPath } from "url";
+import {
+    buildClassificationLog,
+    buildPlaceholderMarkup,
+    classifyNode,
+} from "./core/content-classifier.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -31,6 +36,10 @@ const unwrapUselessSpans = ($, referencedIds, definedClasses) => {
     });
 };
 
+const logClassification = (logger, payload) => {
+    logger.write("INFO", `Content Filter: ${JSON.stringify(payload)}`);
+};
+
 /**
  * 把章节内所有 batch 塞进全局队列，返回一个 Promise。
  * Promise resolve 时该章节已完全翻译完毕（含重试轮次）。
@@ -49,15 +58,77 @@ const enqueueChapterTranslation = (
 
     unwrapUselessSpans($, referencedIds, definedClasses);
 
+    let skippedNodeCount = 0;
+
+    $("table").each((i, el) => {
+        const $el = $(el);
+        const cellTexts = $el
+            .find("th, td")
+            .map((_, cell) => $(cell).text())
+            .get();
+        const classification = classifyNode({
+            tagName: el.name,
+            text: $el.text(),
+            html: $el.html(),
+            cellTexts,
+        });
+
+        if (classification.action !== "PLACEHOLDER") return;
+
+        const placeholder = buildPlaceholderMarkup(classification, "div");
+        if (!placeholder) return;
+
+        const logEntry = buildClassificationLog(
+            `table_${i}`,
+            classification,
+            $el.text(),
+        );
+        skippedNodeCount++;
+        logClassification(logger, logEntry);
+        $el.replaceWith(placeholder);
+    });
+
     const nodesToTranslate = [];
     $("p, li, h1, h2, h3, h4, h5, h6, caption, title").each((i, el) => {
         const $el = $(el);
-        const originalHtml = $el.html().trim();
-        if (originalHtml) {
-            const nodeId = `node_${i}`;
-            $el.attr("data-t-id", nodeId);
-            nodesToTranslate.push({ id: nodeId, content: originalHtml });
+        const originalHtml = $el.html()?.trim();
+        if (!originalHtml) return;
+
+        const nodeId = `node_${i}`;
+        const classification = classifyNode({
+            tagName: el.name,
+            text: $el.text(),
+            html: originalHtml,
+        });
+
+        if (classification.action === "DROP") {
+            skippedNodeCount++;
+            logClassification(
+                logger,
+                buildClassificationLog(nodeId, classification, $el.text()),
+            );
+            $el.remove();
+            return;
         }
+
+        if (classification.action === "PLACEHOLDER") {
+            const placeholder = buildPlaceholderMarkup(
+                classification,
+                el.name || "span",
+            );
+            skippedNodeCount++;
+            logClassification(
+                logger,
+                buildClassificationLog(nodeId, classification, $el.text()),
+            );
+            if (placeholder) {
+                $el.replaceWith(placeholder);
+            }
+            return;
+        }
+
+        $el.attr("data-t-id", nodeId);
+        nodesToTranslate.push({ id: nodeId, content: originalHtml });
     });
 
     if (nodesToTranslate.length === 0) {
@@ -161,6 +232,11 @@ const enqueueChapterTranslation = (
     // 返回整个异步链，但 enqueue 动作是立即发生的（不等 await）
     return runRound(nodesToTranslate, chapterTitle).then(() => {
         $("[data-t-id]").removeAttr("data-t-id");
+        if (skippedNodeCount > 0) {
+            console.log(
+                `    - 🧹 Filtered ${skippedNodeCount} node(s) before translation.`,
+            );
+        }
         return $.xml();
     });
 };
