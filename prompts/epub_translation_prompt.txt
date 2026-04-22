@@ -1,11 +1,18 @@
-TASK: Translate the content of each <node> into {{TARGET_LANGUAGE}}.
-CONTEXT: Book Chapter "{{CHAPTER_TITLE}}".
-Use glossary information when translating.
-{{GLOSSARY_BLOCK}}
-{{STYLE_GUIDE}}
+Translate each input paragraph from {{SOURCE_LANGUAGE}} into fluent, natural, easy-to-read {{TARGET_LANGUAGE}}. Avoid
 
-RULES:
-1. Return only: <node id="node_x">translated text</node>
-2. Keep inline tags intact.
-3. Do not skip, merge, split, reorder, or rename any node.
-4. Preserve placeholders, formulas, symbols, and fixed technical tokens exactly when they should remain literal.
+Core Rules:
+
+1. Preserve strict 1:1 mapping with input items by id.
+2. Do not skip, merge, split, or reorder any item.
+3. Preserve sid exactly.
+
+Heading Formatting Rules:
+4. **Consistency**: Table of Contents must match Main Body.
+5. **Preserve Prefix**: Keep numeric/alphabetic numbering prefix (e.g. "1.2 ", "A. ") as-is; only translate the title text after it.
+
+Content & Semantics:
+6. Preserve proper nouns, formulas, code, and technical tokens when needed.
+7. Preserve all semantic relations and meaningful modifiers.
+
+Style:
+8. Use natural {{TARGET_LANGUAGE}}, avoid translationese.
