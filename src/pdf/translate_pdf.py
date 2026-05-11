@@ -21,6 +21,8 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
+from vector_extract import RebuildOptions, rebuild_pdf_graphic_layers
+
 
 def require_fitz():
     try:
@@ -63,6 +65,16 @@ ARXIV_METADATA_REGEX = re.compile(
     flags=re.IGNORECASE,
 )
 PDF_BLOCKS_SCHEMA_VERSION = 2
+
+
+def decode_span_flags(flags: int) -> Dict[str, bool]:
+    return {
+        "isSuperscriptLike": bool(flags & 1),
+        "isItalicLike": bool(flags & 2),
+        "isSerifLike": bool(flags & 4),
+        "isMonospaceLike": bool(flags & 8),
+        "isBoldLike": bool(flags & 16),
+    }
 
 
 def contains_cjk(text: str) -> bool:
@@ -110,6 +122,70 @@ def get_font_role(block: Dict[str, Any]) -> str:
     if block.get("role") == "heading":
         return "heading"
     return "body"
+
+
+def get_preferred_text_style(
+    block: Dict[str, Any],
+    font_role: str,
+    bold: bool = False,
+) -> str:
+    if font_role == "code":
+        return "monospace"
+    if block.get("hasItalicLike") and not contains_cjk(normalize_text(block.get("text") or "")):
+        return "bold_italic" if (font_role == "heading" or bold or block.get("hasBoldLike")) else "italic"
+    if font_role == "heading" or bold or block.get("hasBoldLike"):
+        return "bold"
+    return "normal"
+
+
+def get_source_line_style(
+    block: Dict[str, Any],
+    line_index: int,
+    default_font_role: str,
+    default_bold: bool,
+) -> Dict[str, Any]:
+    layout_lines = block.get("layoutLines") or []
+    if line_index < 0 or line_index >= len(layout_lines):
+        return {
+            "font_role": default_font_role,
+            "bold": default_bold,
+            "preferred_style": get_preferred_text_style(block, default_font_role, default_bold),
+        }
+
+    items = layout_lines[line_index].get("items", []) or []
+    text_items = [item for item in items if item.get("type") == "text" and normalize_text(str(item.get("text", "") or ""))]
+    if not text_items:
+        return {
+            "font_role": default_font_role,
+            "bold": default_bold,
+            "preferred_style": get_preferred_text_style(block, default_font_role, default_bold),
+        }
+
+    monospace_only = all(bool(item.get("isMonospaceLike")) for item in text_items)
+    has_bold = any(bool(item.get("isBoldLike")) for item in text_items)
+    has_italic = any(bool(item.get("isItalicLike")) for item in text_items)
+    has_superscript = any(bool(item.get("isSuperscriptLike")) for item in text_items)
+    line_text = normalize_text("".join(str(item.get("text", "") or "") for item in text_items))
+    line_is_cjk = contains_cjk(line_text)
+
+    if monospace_only:
+        return {"font_role": "code", "bold": False, "preferred_style": "monospace"}
+    if has_italic and not line_is_cjk:
+        preferred_style = "bold_italic" if has_bold else "italic"
+        return {"font_role": default_font_role, "bold": bool(has_bold or default_bold), "preferred_style": preferred_style}
+    if has_bold:
+        return {"font_role": default_font_role, "bold": True, "preferred_style": "bold"}
+    if has_superscript and default_font_role == "metadata":
+        return {
+            "font_role": default_font_role,
+            "bold": default_bold,
+            "preferred_style": get_preferred_text_style(block, default_font_role, default_bold),
+        }
+    return {
+        "font_role": default_font_role,
+        "bold": default_bold,
+        "preferred_style": get_preferred_text_style(block, default_font_role, default_bold),
+    }
 
 
 def is_formula_like_text(text: str) -> bool:
@@ -162,17 +238,23 @@ def merge_span_items(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             continue
         bbox = [float(v) for v in item.get("bbox", [0, 0, 0, 0])]
         item_type = item.get("type") or "text"
-        if merged and merged[-1]["type"] == item_type:
+        style_signature = (
+            int(item.get("flags", 0) or 0),
+            str(item.get("font", "") or ""),
+            round(float(item.get("size", 0) or 0), 2),
+        )
+        if (
+            merged
+            and merged[-1]["type"] == item_type
+            and merged[-1].get("_styleSignature") == style_signature
+        ):
             merged[-1]["text"] += text
             merged[-1]["bbox"] = expand_bbox(merged[-1]["bbox"], bbox)
             continue
-        merged.append(
-            {
-                "type": item_type,
-                "text": text,
-                "bbox": bbox,
-            }
-        )
+        merged.append({**item, "type": item_type, "text": text, "bbox": bbox, "_styleSignature": style_signature})
+
+    for item in merged:
+        item.pop("_styleSignature", None)
     return merged
 
 
@@ -942,11 +1024,16 @@ def resolve_font_options(
     text: str,
     bold: bool = False,
     font_role: str = "body",
+    preferred_style: str = "normal",
 ) -> Dict[str, Any]:
     if not contains_cjk(text):
-        if font_role == "code":
+        if preferred_style == "monospace" or font_role == "code":
             return {"fontname": "cour"}
-        if font_role == "heading":
+        if preferred_style == "bold_italic":
+            return {"fontname": "Times-BoldItalic"}
+        if preferred_style == "italic":
+            return {"fontname": "Times-Italic"}
+        if preferred_style == "bold" or font_role == "heading":
             return {"fontname": "Times-Bold"}
         return {"fontname": "Times-Bold" if bold else "Times-Roman"}
 
@@ -1005,7 +1092,8 @@ def resolve_font_options(
         ],
     }
 
-    candidates = role_candidates.get(font_role, role_candidates["body"])
+    effective_role = "code" if preferred_style == "monospace" else font_role
+    candidates = role_candidates.get(effective_role, role_candidates["body"])
     if bold and font_role == "body":
         candidates = [
             configured_font,
@@ -1024,7 +1112,7 @@ def resolve_font_options(
         if candidate and os.path.exists(candidate):
             return {"fontname": "cjk_fallback", "fontfile": candidate}
 
-    return {"fontname": "helvB" if bold else "helv"}
+    return {"fontname": "cour" if preferred_style == "monospace" else ("helvB" if bold or preferred_style == "bold" else "helv")}
 
 
 def direction_to_rotation(direction: Any) -> int:
@@ -1920,6 +2008,11 @@ def extract_blocks(input_pdf: str, output_json: str, pages: Optional[List[int]] 
             max_font_size = 0.0
             span_sizes = []
             rotations = []
+            block_flag_values: Set[int] = set()
+            block_has_italic = False
+            block_has_monospace = False
+            block_has_bold = False
+            block_has_superscript = False
             for line in block.get("lines", []):
                 spans = line.get("spans", [])
                 line_text = normalize_text("".join(span.get("text", "") for span in spans))
@@ -1938,6 +2031,13 @@ def extract_blocks(input_pdf: str, output_json: str, pages: Optional[List[int]] 
                     if not span_text:
                         continue
                     span_bbox = [float(v) for v in span.get("bbox", [0, 0, 0, 0])]
+                    span_flags = int(span.get("flags", 0) or 0)
+                    span_flag_hints = decode_span_flags(span_flags)
+                    block_flag_values.add(span_flags)
+                    block_has_italic = block_has_italic or span_flag_hints["isItalicLike"]
+                    block_has_monospace = block_has_monospace or span_flag_hints["isMonospaceLike"]
+                    block_has_bold = block_has_bold or span_flag_hints["isBoldLike"]
+                    block_has_superscript = block_has_superscript or span_flag_hints["isSuperscriptLike"]
                     line_items.append(
                         {
                             "type": "formula" if is_formula_span(span, block_font_size) else "text",
@@ -1945,6 +2045,8 @@ def extract_blocks(input_pdf: str, output_json: str, pages: Optional[List[int]] 
                             "bbox": span_bbox,
                             "font": str(span.get("font", "") or ""),
                             "size": float(span.get("size", 0) or 0),
+                            "flags": span_flags,
+                            **span_flag_hints,
                         }
                     )
                 merged_items = merge_span_items(line_items)
@@ -1978,6 +2080,11 @@ def extract_blocks(input_pdf: str, output_json: str, pages: Optional[List[int]] 
                     "rotation": max(set(rotations), key=rotations.count) if rotations else 0,
                     "layoutLines": layout_lines,
                     "role": "paragraph",
+                    "spanFlags": sorted(block_flag_values),
+                    "hasItalicLike": block_has_italic,
+                    "hasMonospaceLike": block_has_monospace,
+                    "hasBoldLike": block_has_bold,
+                    "hasSuperscriptLike": block_has_superscript,
                     "text": text,
                 }
             )
@@ -2026,6 +2133,11 @@ def extract_blocks(input_pdf: str, output_json: str, pages: Optional[List[int]] 
                 block,
                 page_body_width,
                 page_body_font_size,
+            )
+            block["preferredTextStyle"] = get_preferred_text_style(
+                block,
+                get_font_role(block),
+                bool(block.get("role") == "heading"),
             )
 
         preserved_regions = detect_scored_table_regions(page, page_blocks, page_width)
@@ -2126,10 +2238,17 @@ def fit_textbox(
     bold: bool = False,
     min_font_size: float = 5.0,
     font_role: str = "body",
+    debug_visuals: bool = False,
 ) -> bool:
     # Start from the extracted size so the result stays visually closer to the source.
     size = max(min(font_size or 10, 36), min_font_size)
-    font_options = resolve_font_options(text, bold=bold, font_role=font_role)
+    preferred_style = get_preferred_text_style(block, font_role, bold)
+    font_options = resolve_font_options(
+        text,
+        bold=bold,
+        font_role=font_role,
+        preferred_style=preferred_style,
+    )
     measure_font = create_measure_font(fitz, font_options)
     preserve_source_breaks = should_preserve_source_line_breaks(block, font_role)
     layout_lines = block.get("layoutLines") or []
@@ -2161,6 +2280,46 @@ def fit_textbox(
             if preserve_source_breaks
             else wrap_text_for_box_precise(text, rect, size, measure_font)
         )
+        if preserve_source_breaks and (block.get("hasMonospaceLike") or block.get("hasBoldLike")):
+            logical_lines = wrapped.splitlines()
+            if logical_lines:
+                max_line_width = 0.0
+                for line_index, line_text in enumerate(logical_lines):
+                    style = get_source_line_style(block, line_index, font_role, bold)
+                    line_font_options = resolve_font_options(
+                        line_text,
+                        bold=bool(style["bold"]),
+                        font_role=str(style["font_role"]),
+                        preferred_style=str(style["preferred_style"]),
+                    )
+                    line_measure_font = create_measure_font(fitz, line_font_options)
+                    max_line_width = max(
+                        max_line_width,
+                        measure_text_width(line_measure_font, line_text, size),
+                    )
+                lineheight = 1.05 if bold else 1.1
+                total_height = len(logical_lines) * size * lineheight
+                if max_line_width <= rect.width - 2 and total_height <= rect.height + 1:
+                    ascender_default = float(getattr(measure_font, "ascender", 1.0) or 1.0)
+                    for line_index, line_text in enumerate(logical_lines):
+                        style = get_source_line_style(block, line_index, font_role, bold)
+                        line_font_options = resolve_font_options(
+                            line_text,
+                            bold=bool(style["bold"]),
+                            font_role=str(style["font_role"]),
+                            preferred_style=str(style["preferred_style"]),
+                        )
+                        line_measure_font = create_measure_font(fitz, line_font_options)
+                        ascender = float(getattr(line_measure_font, "ascender", ascender_default) or ascender_default)
+                        baseline_y = rect.y0 + line_index * size * lineheight + size * ascender
+                        page.insert_text(
+                            (rect.x0 + 1.0, baseline_y),
+                            line_text,
+                            fontsize=size,
+                            color=(0, 0, 0),
+                            **line_font_options,
+                        )
+                    return True
         overflow = page.insert_textbox(
             rect,
             wrapped,
@@ -2174,7 +2333,13 @@ def fit_textbox(
         if overflow >= 0:
             return True
         # Remove the failed insertion by redrawing a white rectangle before retry.
-        page.draw_rect(rect, color=(1, 1, 1), fill=(1, 1, 1), overlay=True)
+        page.draw_rect(
+            rect,
+            fill=(1, 1, 1),
+            color=(1, 1, 1) if debug_visuals else None,
+            width=0.7 if debug_visuals else 0,
+            overlay=True,
+        )
         size -= 0.5
 
     fallback_size = max(min(min_font_size, font_size or 10), 3.0)
@@ -2354,6 +2519,8 @@ def fit_mixed_textbox(
     bold: bool = False,
     min_font_size: float = 5.0,
     font_role: str = "body",
+    debug_visuals: bool = False,
+    redact_before_write: bool = True,
 ) -> bool:
     if rotation != 0:
         return False
@@ -2363,7 +2530,13 @@ def fit_mixed_textbox(
 
     size = max(min(font_size or 10, 36), min_font_size)
     preserve_source_breaks = should_preserve_source_line_breaks(block, font_role)
-    font_options = resolve_font_options(text, bold=bold, font_role=font_role)
+    preferred_style = get_preferred_text_style(block, font_role, bold)
+    font_options = resolve_font_options(
+        text,
+        bold=bold,
+        font_role=font_role,
+        preferred_style=preferred_style,
+    )
     measure_font = create_measure_font(fitz, font_options)
     lineheight = 1.05 if bold else 1.1
     source_page_number = max(int(block.get("page", 1)) - 1, 0)
@@ -2390,8 +2563,9 @@ def fit_mixed_textbox(
             **font_options,
         )
 
-        page.add_redact_annot(rect, fill=(1, 1, 1))
-        page.apply_redactions()
+        if redact_before_write:
+            page.add_redact_annot(rect, fill=(1, 1, 1))
+            page.apply_redactions()
         shape.commit(overlay=True)
         render_inline_formula_clips(
             page,
@@ -2408,38 +2582,48 @@ def fit_mixed_textbox(
     return False
 
 
-def fill_pdf(input_pdf: str, translated_json: str, output_pdf: str) -> None:
-    fitz = require_fitz()
-    payload = json.loads(Path(translated_json).read_text(encoding="utf-8"))
-    source_doc = fitz.open(input_pdf)
-    doc = fitz.open(input_pdf)
-    written = 0
-    failed = 0
+def write_translated_block(
+    page,
+    block: Dict[str, Any],
+    fitz,
+    *,
+    source_doc=None,
+    erase_mode: str = "redact",
+    debug_visuals: bool = False,
+) -> Optional[bool]:
+    rect = fitz.Rect(*block.get("bbox", [0, 0, 0, 0]))
+    if rect.is_empty or rect.is_infinite:
+        return None
 
-    for block in payload.get("blocks", []):
-        if block.get("preserveOriginal"):
-            continue
-        translated = sanitize_translated_text(block.get("translatedText") or "")
-        if not translated:
-            continue
-        page_number = int(block.get("page", 0)) - 1
-        if page_number < 0 or page_number >= len(doc):
-            continue
-        page = doc[page_number]
-        rect = fitz.Rect(*block.get("bbox", [0, 0, 0, 0]))
-        rotation = int(block.get("rotation") or 0)
-        bold = block.get("role") == "heading"
-        font_role = get_font_role(block)
-        base_font_size = float(block.get("fontSize") or 10)
-        if bold:
-            min_font_size = 5.5
-        elif block.get("hasSizeJump"):
-            min_font_size = 4.8
-        else:
-            min_font_size = 4.5
-        if rect.is_empty or rect.is_infinite:
-            continue
+    if block.get("preserveOriginal"):
+        if erase_mode == "none" and source_doc is not None:
+            source_page_number = max(int(block.get("page", 1)) - 1, 0)
+            clip = source_doc[source_page_number].rect & rect
+            if clip.is_empty:
+                return False
+            page.show_pdf_page(rect, source_doc, source_page_number, clip=clip, overlay=True)
+            return True
+        return None
 
+    translated = sanitize_translated_text(block.get("translatedText") or "")
+    if not translated:
+        return None
+
+    rotation = int(block.get("rotation") or 0)
+    bold = block.get("role") == "heading"
+    font_role = get_font_role(block)
+    base_font_size = float(block.get("fontSize") or 10)
+    if bold:
+        min_font_size = 5.5
+    elif block.get("hasSizeJump"):
+        min_font_size = 4.8
+    else:
+        min_font_size = 4.5
+
+    can_use_mixed = should_use_mixed_textbox(block) and source_doc is not None
+    success = False
+
+    if can_use_mixed:
         success = fit_mixed_textbox(
             page,
             source_doc,
@@ -2452,15 +2636,23 @@ def fill_pdf(input_pdf: str, translated_json: str, output_pdf: str) -> None:
             bold=bold,
             min_font_size=min_font_size,
             font_role=font_role,
+            debug_visuals=debug_visuals,
+            redact_before_write=(erase_mode == "redact"),
         )
-        if not success:
-            use_literal_inline = block.get("blockType") != "body"
-            translated = replace_inline_formula_placeholders(
-                translated,
-                block,
-                base_font_size,
-                use_literal=use_literal_inline,
-            )
+
+    if not success:
+        use_literal_inline = (
+            erase_mode == "none"
+            or source_doc is None
+            or block.get("blockType") != "body"
+        )
+        translated = replace_inline_formula_placeholders(
+            translated,
+            block,
+            base_font_size,
+            use_literal=use_literal_inline,
+        )
+        if erase_mode == "redact":
             preserved_inline = (
                 False
                 if use_literal_inline
@@ -2469,31 +2661,85 @@ def fill_pdf(input_pdf: str, translated_json: str, output_pdf: str) -> None:
             if not preserved_inline:
                 page.add_redact_annot(rect, fill=(1, 1, 1))
                 page.apply_redactions()
-            success = fit_textbox(
-                page,
-                rect,
-                translated,
-                block,
-                base_font_size,
-                rotation,
-                fitz,
-                bold=bold,
-                min_font_size=min_font_size,
-                font_role=font_role,
-            )
-        if success:
-            written += 1
-        else:
-            failed += 1
-            preview = normalize_text(translated)[:80]
-            print(
-                f"WARN: writeback failed for {block.get('id')} on page {block.get('page')} "
-                f"bbox={block.get('bbox')} text={preview!r}",
-            )
+        success = fit_textbox(
+            page,
+            rect,
+            translated,
+            block,
+            base_font_size,
+            rotation,
+            fitz,
+            bold=bold,
+            min_font_size=min_font_size,
+            font_role=font_role,
+            debug_visuals=debug_visuals,
+        )
 
-    Path(output_pdf).parent.mkdir(parents=True, exist_ok=True)
-    doc.save(output_pdf, garbage=4, deflate=True)
-    print(f"Filled translated PDF: {output_pdf} (written={written}, failed={failed})")
+    return success
+
+
+def fill_rebuilt_pdf(input_pdf: str, translated_json: str, output_pdf: str) -> None:
+    fitz = require_fitz()
+    payload = json.loads(Path(translated_json).read_text(encoding="utf-8"))
+    written = 0
+    failed = 0
+    preserved = 0
+    blocks_by_page: Dict[int, List[Dict[str, Any]]] = {}
+    for block in payload.get("blocks", []):
+        page_number = int(block.get("page", 0)) - 1
+        blocks_by_page.setdefault(page_number, []).append(block)
+
+    def render_text_callback(src_page, dst_page, page_index: int) -> None:
+        nonlocal written, failed, preserved
+        for block in blocks_by_page.get(page_index, []):
+            result = write_translated_block(
+                dst_page,
+                block,
+                fitz,
+                source_doc=src_page.parent,
+                erase_mode="none",
+                debug_visuals=False,
+            )
+            if result is None:
+                continue
+            if result:
+                if block.get("preserveOriginal"):
+                    preserved += 1
+                else:
+                    written += 1
+            else:
+                failed += 1
+                preview_source = (
+                    block.get("text")
+                    if block.get("preserveOriginal")
+                    else sanitize_translated_text(block.get("translatedText") or "")
+                )
+                preview = normalize_text(preview_source or "")[:80]
+                print(
+                    f"WARN: rebuilt write failed for {block.get('id')} on page {block.get('page')} "
+                    f"bbox={block.get('bbox')} text={preview!r}",
+                )
+
+    stats = rebuild_pdf_graphic_layers(
+        input_pdf=input_pdf,
+        output_pdf=output_pdf,
+        options=RebuildOptions(
+            rebuild_vectors=True,
+            rebuild_images=True,
+            rebuild_links=True,
+            min_drawing_area=0,
+            verbose=True,
+        ),
+        render_text_callback=render_text_callback,
+    )
+    print(
+        f"Filled rebuilt PDF: {output_pdf} "
+        f"(written={written}, preserved={preserved}, failed={failed}, "
+        f"drawings={stats.drawings}, skipped_drawings={stats.skipped_drawings}, "
+        f"images={stats.images}, placements={stats.image_placements}, "
+        f"smask_images={stats.images_with_smask}, "
+        f"skipped_images={stats.skipped_images}, links={stats.links})"
+    )
 
 
 def main(argv: List[str]) -> int:
@@ -2514,7 +2760,7 @@ def main(argv: List[str]) -> int:
     if args.command == "extract":
         extract_blocks(args.input_pdf, args.output_json, args.pages)
     elif args.command == "fill":
-        fill_pdf(args.input_pdf, args.translated_json, args.output_pdf)
+        fill_rebuilt_pdf(args.input_pdf, args.translated_json, args.output_pdf)
     return 0
 
 

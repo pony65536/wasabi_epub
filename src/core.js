@@ -29,7 +29,10 @@ import {
 } from "./translation/translator.js";
 import { synchronizeTocHtml, synchronizeNcx } from "./epub/tocSync.js";
 import { saveEpub } from "./epub/epubSaver.js";
-import { extractPdfToJson, fillPdfFromJson } from "./pdf/pdfBridge.js";
+import {
+    extractPdfToJson,
+    fillPdfFromJson,
+} from "./pdf/pdfBridge.js";
 import { applyTranslatedHtmlToPdfJson, pdfJsonToHtml } from "./pdf/pdfHtml.js";
 
 const sanitizeFileToken = (value) =>

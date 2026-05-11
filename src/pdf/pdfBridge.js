@@ -127,6 +127,7 @@ export const fillPdfFromJson = async (
     logger,
 ) => {
     fs.mkdirSync(path.dirname(outputPath), { recursive: true });
-    await runPython(["fill", inputPath, translatedJsonPath, outputPath], logger);
+    const args = ["fill", inputPath, translatedJsonPath, outputPath];
+    await runPython(args, logger);
     return outputPath;
 };
