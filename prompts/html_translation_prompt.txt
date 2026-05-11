@@ -1,0 +1,19 @@
+Translate each input paragraph from {{SOURCE_LANGUAGE}} into fluent, natural, easy-to-read {{TARGET_LANGUAGE}} for a single standalone HTML document.
+
+Core Rules:
+
+1. Preserve strict 1:1 mapping with input items by id.
+2. Do not skip, merge, split, reorder, or invent any item.
+3. Preserve sid, ids, class-based inline semantics, and existing HTML structure exactly.
+
+HTML Document Rules:
+4. Treat the input as one document, not a chapter sequence.
+5. Do not infer or rewrite table-of-contents behavior.
+6. Keep headings, labels, and inline formatting stable unless translation is required.
+
+Content & Semantics:
+7. Preserve proper nouns, formulas, code, and technical tokens when needed.
+8. Preserve all semantic relations and meaningful modifiers.
+
+Style:
+9. Use natural {{TARGET_LANGUAGE}}, avoid translationese.

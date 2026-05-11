@@ -23,9 +23,14 @@ import {
     standardizeHeadingsByRules,
 } from "./content/headings.js";
 import { generateInitialGlossary } from "./content/glossary.js";
-import { performTranslation } from "./translation/translator.js";
+import {
+    collectVisibleTextNodes,
+    performTranslation,
+} from "./translation/translator.js";
 import { synchronizeTocHtml, synchronizeNcx } from "./epub/tocSync.js";
 import { saveEpub } from "./epub/epubSaver.js";
+import { extractPdfToJson, fillPdfFromJson } from "./pdf/pdfBridge.js";
+import { applyTranslatedHtmlToPdfJson, pdfJsonToHtml } from "./pdf/pdfHtml.js";
 
 const sanitizeFileToken = (value) =>
     value.replace(/['"]/g, "").replace(/[<>:"/\\|?*\s]+/g, "_");
@@ -57,6 +62,29 @@ const countCachedChapters = (cache, chapters) =>
         (count, chapter) => count + (cache.load(chapter.id) ? 1 : 0),
         0,
     );
+
+const PDF_BLOCKS_SCHEMA_VERSION = 2;
+
+const logPdfDoclingSummary = (pdfJson) => {
+    const summary = pdfJson?.doclingSummary;
+    if (!summary) return;
+
+    if (summary.enabled) {
+        const labelCounts = summary.labelCounts || {};
+        const labelPreview = Object.entries(labelCounts)
+            .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+            .slice(0, 6)
+            .map(([label, count]) => `${label}=${count}`)
+            .join(", ");
+        console.log(
+            `   Docling: status=${summary.status} items=${summary.items ?? 0} matchedBlocks=${summary.matchedBlocks ?? 0} elapsedMs=${summary.elapsedMs ?? 0}${labelPreview ? ` labels=[${labelPreview}]` : ""}`,
+        );
+    } else {
+        console.log(
+            `   Docling: status=${summary.status || "disabled"}${summary.error ? ` error=${summary.error}` : ""}`,
+        );
+    }
+};
 
 const ensureDir = (dirPath) => {
     if (!fs.existsSync(dirPath)) {
@@ -196,6 +224,29 @@ const createSingleHtmlChapterMap = (inputPath) => {
     };
 
     return new Map([[chapter.id, chapter]]);
+};
+
+const createHtmlGlossarySourceMap = (chapterMap) => {
+    const glossarySourceMap = new Map();
+    const silentLogger = { write: () => {} };
+
+    for (const chapter of chapterMap.values()) {
+        const $ = loadHtml(chapter.html);
+        const root = $("body").length ? $("body") : $.root();
+        const visibleNodes = collectVisibleTextNodes(
+            $,
+            root,
+            silentLogger,
+            false,
+        );
+
+        glossarySourceMap.set(chapter.id, {
+            ...chapter,
+            html: visibleNodes.map((node) => node.content).join(" "),
+        });
+    }
+
+    return glossarySourceMap;
 };
 
 const saveHtmlDocument = async (outputPath, html, logger) => {
@@ -371,6 +422,7 @@ export const runTranslationJob = async ({
             cache,
             referencedIds,
             definedClasses,
+            "epub",
             debugMode,
         );
 
@@ -498,8 +550,9 @@ export const runHtmlTranslationJob = async ({
             console.log("\n📊 Step 2: Loading glossary from cache...");
             glossary = cachedGlossary;
         } else {
+            const glossarySourceMap = createHtmlGlossarySourceMap(chapterMap);
             glossary = await generateInitialGlossary(
-                chapterMap,
+                glossarySourceMap,
                 glossaryProvider,
                 logger,
                 runtimeConfig,
@@ -523,6 +576,7 @@ export const runHtmlTranslationJob = async ({
                 cache,
                 referencedIds,
                 definedClasses,
+                "html",
                 debugMode,
             );
             await batchQueue.drainQueue();
@@ -552,6 +606,229 @@ export const runHtmlTranslationJob = async ({
         logger.write(
             "ERROR",
             `Main Process Fatal Error: ${error.stack || error.message}`,
+        );
+        throw error;
+    } finally {
+        if (!shouldKeepArtifacts) {
+            cache.removeDir();
+            logger.remove();
+        }
+    }
+};
+
+export const runPdfTranslationJob = async ({
+    projectRoot,
+    inputPath,
+    pageSelector = null,
+    selectedPages = null,
+    debugMode = false,
+    runtimeConfig,
+}) => {
+    const logDir = path.resolve(projectRoot, "log");
+    const inputDir = path.resolve(projectRoot, "input");
+    const outputDir = path.resolve(projectRoot, "output");
+    ensureDir(logDir);
+    ensureDir(inputDir);
+    ensureDir(outputDir);
+
+    const logger = createLogger(logDir);
+    const aiProvider = createAIProvider(
+        CURRENT_PROVIDER,
+        runtimeConfig,
+        logger,
+        FALLBACK_PROVIDER,
+        FALLBACK_ON_CONTENT_POLICY,
+    );
+    const glossaryProvider = createGlossaryProvider(logger, runtimeConfig);
+    const batchQueue = createBatchQueue(aiProvider, logger);
+
+    const fileInfo = path.parse(inputPath);
+    const selectionSlug = createSelectionSlug(pageSelector);
+    const targetLanguageSlug = getLanguageFileCode(runtimeConfig.targetLanguage);
+    const outputPdfPath = path.resolve(
+        outputDir,
+        pageSelector
+            ? `${fileInfo.name}_page-${selectionSlug}_${targetLanguageSlug}.pdf`
+            : `${fileInfo.name}_${targetLanguageSlug}.pdf`,
+    );
+    const outputHtmlPath = path.resolve(
+        outputDir,
+        pageSelector
+            ? `${fileInfo.name}_page-${selectionSlug}_${targetLanguageSlug}.html`
+            : `${fileInfo.name}_${targetLanguageSlug}.html`,
+    );
+    const cacheDir = path.resolve(
+        projectRoot,
+        pageSelector
+            ? `.cache_${fileInfo.name}_page-${selectionSlug}_pdf`
+            : `.cache_${fileInfo.name}_pdf`,
+    );
+    const cache = createProgressCache(cacheDir);
+    const extractedJsonPath = path.resolve(cacheDir, "pdf_blocks.json");
+    const translatedJsonPath = path.resolve(cacheDir, "pdf_blocks_translated.json");
+    const debugSummaryPath = path.resolve(cacheDir, "pdf_blocks_debug.json");
+
+    console.log(`\n========================================`);
+    console.log(`📕 Input:  ${path.basename(inputPath)}`);
+    console.log(`💾 Output: ${path.basename(outputPdfPath)}`);
+    console.log(`📄 HTML:   ${path.basename(outputHtmlPath)}`);
+    console.log(`📦 Cache:  ${path.basename(cacheDir)}`);
+    console.log(`🐞 Debug: ${debugMode ? "on" : "off"}`);
+    console.log(`🗣️ Source: ${runtimeConfig.sourceLanguage}`);
+    console.log(`🌐 Target: ${runtimeConfig.targetLanguage}`);
+    if (runtimeConfig[CURRENT_PROVIDER]?.concurrency) {
+        console.log(
+            `⚙️ Concurrency: ${runtimeConfig[CURRENT_PROVIDER].concurrency}`,
+        );
+    }
+    if (pageSelector) {
+        console.log(`📄 Pages: ${pageSelector}`);
+    }
+    console.log(`🤖 Provider: ${aiProvider.providerName} (${aiProvider.modelName})`);
+    if (aiProvider.fallbackProviderName) {
+        console.log(`🛟 Fallback: ${aiProvider.fallbackProviderName}`);
+    }
+    console.log(`========================================\n`);
+
+    let shouldKeepArtifacts = debugMode;
+
+    try {
+        console.log("\n📤 Step 1: Extracting PDF text blocks to JSON...");
+        const hasCachedExtraction = fs.existsSync(extractedJsonPath);
+        const cachedPdfJson = hasCachedExtraction
+            ? JSON.parse(fs.readFileSync(extractedJsonPath, "utf8"))
+            : null;
+        const canReuseCachedExtraction =
+            Boolean(cachedPdfJson) &&
+            Number(cachedPdfJson.version || 0) >= PDF_BLOCKS_SCHEMA_VERSION;
+        const pdfJson = canReuseCachedExtraction
+            ? cachedPdfJson
+            : await extractPdfToJson(
+                  inputPath,
+                  extractedJsonPath,
+                  logger,
+                  selectedPages,
+              );
+        if (canReuseCachedExtraction) {
+            console.log(
+                `   Using cached extraction: ${path.basename(extractedJsonPath)}`,
+            );
+        } else {
+            if (hasCachedExtraction && cachedPdfJson) {
+                console.log(
+                    `   Cached extraction version ${cachedPdfJson.version || 0} is stale; regenerating.`,
+                );
+            }
+            console.log(
+                `   Saved fresh extraction: ${path.basename(extractedJsonPath)}`,
+            );
+        }
+        logPdfDoclingSummary(pdfJson);
+
+        const html = pdfJsonToHtml(pdfJson);
+        const chapterMap = new Map([
+            [
+                "document",
+                {
+                    id: "document",
+                    href: `${fileInfo.name}.html`,
+                    html,
+                    entryName: `${fileInfo.name}.html`,
+                    title: pdfJson.title || fileInfo.name || "PDF Document",
+                },
+            ],
+        ]);
+        const chapters = [...chapterMap.values()];
+        const referencedIds = collectReferencedIds(chapterMap);
+        const definedClasses = new Set();
+
+        let glossary = {};
+
+        const cachedGlossary = cache.loadGlossary();
+
+        if (cachedGlossary && Object.keys(cachedGlossary).length > 0) {
+            console.log("\n📊 Step 2: Loading glossary from cache...");
+            glossary = cachedGlossary;
+        } else {
+            glossary = await generateInitialGlossary(
+                chapterMap,
+                glossaryProvider,
+                logger,
+                runtimeConfig,
+            );
+            cache.saveGlossary(glossary);
+        }
+
+        const cachedHtml = cache.load("document");
+        if (cachedHtml) {
+            console.log(`\n📑 Found cached translated PDF HTML, reusing it.`);
+            chapterMap.get("document").html = cachedHtml;
+        } else {
+            await performTranslation(
+                chapters,
+                chapterMap,
+                glossary,
+                runtimeConfig,
+                aiProvider,
+                batchQueue,
+                logger,
+                cache,
+                referencedIds,
+                definedClasses,
+                debugMode,
+            );
+            await batchQueue.drainQueue();
+        }
+
+        const translatedHtml = chapterMap.get("document").html;
+        console.log(`\n💾 Step 4: Saving translated HTML snapshot...`);
+        fs.writeFileSync(outputHtmlPath, translatedHtml, "utf8");
+
+        const translatedPdfJson = applyTranslatedHtmlToPdfJson(pdfJson, translatedHtml);
+        fs.writeFileSync(
+            translatedJsonPath,
+            JSON.stringify(translatedPdfJson, null, 2),
+            "utf8",
+        );
+        fs.writeFileSync(
+            debugSummaryPath,
+            JSON.stringify(
+                (translatedPdfJson.blocks || []).map((block) => ({
+                    id: block.id,
+                    page: block.page,
+                    role: block.role,
+                    preserveOriginal: Boolean(block.preserveOriginal),
+                    preserveReason: block.preserveReason || null,
+                    fontSize: block.fontSize,
+                    bbox: block.bbox,
+                    text: block.text,
+                    translatedText: block.translatedText || null,
+                })),
+                null,
+                2,
+            ),
+            "utf8",
+        );
+        console.log(`🧾 Debug:  ${path.basename(debugSummaryPath)}`);
+
+        console.log("\n📥 Step 5: Filling translated text back into PDF...");
+        await fillPdfFromJson(inputPath, translatedJsonPath, outputPdfPath, logger);
+
+        const finalInputPath = path.resolve(inputDir, path.basename(inputPath));
+        moveFileIfNeeded(inputPath, finalInputPath);
+
+        console.log(`\n✅ All done! Output: ${path.basename(outputPdfPath)}`);
+        return {
+            outputPath: outputPdfPath,
+            htmlOutputPath: outputHtmlPath,
+            cacheDir,
+            logFile: logger.logFile,
+        };
+    } catch (error) {
+        shouldKeepArtifacts = debugMode;
+        logger.write(
+            "ERROR",
+            `PDF Process Fatal Error: ${error.stack || error.message}`,
         );
         throw error;
     } finally {

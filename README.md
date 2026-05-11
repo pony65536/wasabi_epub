@@ -1,11 +1,11 @@
-# EPUB / HTML 自动翻译工具
+# EPUB / HTML / PDF 自动翻译工具
 
-将 EPUB 电子书或单个 HTML 文档翻译为目标语言，尽量保留原有结构与排版。EPUB 模式会额外处理章节顺序、标题格式、目录同步和缓存续跑；HTML 模式适合单文件文档翻译。
+将 EPUB 电子书、单个 HTML 文档或 PDF 文档翻译为目标语言，尽量保留原有结构与排版。EPUB 模式会额外处理章节顺序、标题格式、目录同步和缓存续跑；HTML 模式适合单文件文档翻译；PDF 模式由 Python 负责提取 JSON 文本块和回填，翻译仍复用现有 Wasabi 引擎。
 
 ## 功能概览
 
-- 支持 `EPUB` 和 `HTML / HTM` 输入
-- CLI 支持输入文件、章节选择、源语言、目标语言、并发和调试开关
+- 支持 `EPUB`、`HTML / HTM` 和 `PDF` 输入
+- CLI 支持输入文件、章节选择、页码选择、源语言、目标语言、并发和调试开关
 - 多 Provider 支持：`Gemini`、`Qwen`、`Mimo`、`OpenRouter`
 - 支持多语言工作流：英语、西班牙语、法语、俄语、简体中文、日语、韩语
 - 自动章节规划：识别 TOC，优先翻译正文，再处理前言/附录类内容
@@ -15,12 +15,15 @@
 - 断点续传：章节级缓存，重跑时自动复用已完成结果
 - 提取阶段内容过滤：在进入翻译前丢弃明显 OCR 噪声，并为明显伪表格插入占位符
 - 翻译完成后自动同步 EPUB HTML TOC 和 NCX 导航
+- PDF 模式通过 PyMuPDF 提取 JSON 文本块，翻译后再回填到 PDF
 
 ## 目录结构
 
 ```text
 wasabi_epub/
 ├── index.js
+├── package.json
+├── requirements-pdf.txt
 ├── src/
 │   ├── core.js
 │   ├── config.js
@@ -33,6 +36,10 @@ wasabi_epub/
 │   ├── epub/
 │   │   ├── epubSaver.js
 │   │   └── tocSync.js
+│   ├── pdf/
+│   │   ├── pdfBridge.js
+│   │   ├── pdfHtml.js
+│   │   └── translate_pdf.py
 │   ├── support/
 │   │   ├── cache.js
 │   │   ├── chapterSelection.js
@@ -42,7 +49,8 @@ wasabi_epub/
 │       ├── batchQueue.js
 │       └── translator.js
 ├── prompts/
-│   └── epub_translation_prompt.txt
+│   ├── epub_translation_prompt.txt
+│   └── html_translation_prompt.txt
 ├── input/
 ├── output/
 └── log/
@@ -50,17 +58,57 @@ wasabi_epub/
 
 主要模块：
 
-- `index.js`：CLI 入口，解析参数并分流到 EPUB / HTML 流程
+- `index.js`：CLI 入口，解析参数并分流到 EPUB / HTML / PDF 流程
 - `src/core.js`：主流程编排，负责输入、缓存、标题规则、术语表、翻译、保存
 - `src/translation/translator.js`：节点收集、翻译批处理、重试和结果回写
 - `src/content/content-classifier.js`：提取阶段分类器，过滤 OCR 噪声、伪表格和公式样内容
 - `src/content/glossary.js`：按源语言做术语提取与 AI 筛选
 - `src/content/headings.js`：标题格式分析与全书标准化
+<<<<<<< ours
+<<<<<<< ours
+<<<<<<< ours
+<<<<<<< ours
+<<<<<<< ours
+<<<<<<< ours
+<<<<<<< ours
+- `prompts/epub_translation_prompt.txt`：EPUB 翻译提示词
+- `prompts/html_translation_prompt.txt`：HTML 翻译提示词
+=======
+- `src/pdf/`：PDF JSON 提取、HTML 中间层转换和翻译文本回填
+>>>>>>> theirs
+=======
+- `src/pdf/`：PDF JSON 提取、HTML 中间层转换和翻译文本回填
+>>>>>>> theirs
+=======
+- `src/pdf/`：PDF JSON 提取、HTML 中间层转换和翻译文本回填
+>>>>>>> theirs
+=======
+- `src/pdf/`：PDF JSON 提取、HTML 中间层转换和翻译文本回填
+>>>>>>> theirs
+=======
+- `src/pdf/`：PDF JSON 提取、HTML 中间层转换和翻译文本回填
+>>>>>>> theirs
+=======
+- `src/pdf/`：PDF JSON 提取、HTML 中间层转换和翻译文本回填
+>>>>>>> theirs
+=======
+- `src/pdf/`：PDF JSON 提取、HTML 中间层转换和翻译文本回填
+>>>>>>> theirs
 
 ## 环境要求
 
 - Node.js 18+
 - npm
+- PDF 模式需要 Python 3 和 PyMuPDF：`python3 -m pip install -r requirements-pdf.txt`
+- PDF 回填中文时需要系统里有可用的 CJK 字体；默认会优先尝试宋体系字体（如 `C:\Windows\Fonts\simsun.ttc` / `STSONG.TTF`），再回退到仿宋和其他 CJK 字体。 如需强制指定，可设置 `PDF_FONT_FILE` 或 `WASABI_PDF_FONT` 指向字体文件。
+<<<<<<< ours
+<<<<<<< ours
+=======
+- Windows / Conda 环境中会优先尝试 `python`，再尝试 `py -3` 和 `python3`；如需指定解释器，可设置 `PYTHON` 或 `PYTHON_BIN`。
+>>>>>>> theirs
+=======
+- Windows / Conda 环境中会优先尝试 `python`，再尝试 `py -3` 和 `python3`；如需指定解释器，可设置 `PYTHON` 或 `PYTHON_BIN`。
+>>>>>>> theirs
 
 安装依赖：
 
@@ -123,13 +171,14 @@ OPENROUTER_API_KEY=your_openrouter_api_key
 
 - `src/config.js` 中的 `buildStyleGuide()`
 - `prompts/epub_translation_prompt.txt`
+- `prompts/html_translation_prompt.txt`
 
 ## CLI 用法
 
 基本格式：
 
 ```bash
-node index.js "your-book.epub|your-file.html" [--chap "<selector>"] [--from "<lang>"] [--to "<lang>"] [--concurrency <n>] [--debug]
+node index.js "your-book.epub|your-file.html|your-file.pdf" [--chap "<selector>"] [--page "<selector>"] [--from "<lang>"] [--to "<lang>"] [--concurrency <n>] [--debug]
 ```
 
 示例：
@@ -147,11 +196,15 @@ node index.js "book.epub" --chap "1-3"
 node index.js "book.epub" --chap "'Blackhole'-'Gravity'"
 node index.js "chapter.html" --to "zh"
 node index.js "chapter.htm" --from "en" --to "fr"
+node index.js "paper.pdf" --to "zh"
+node index.js "paper.pdf" --page "1,3,5" --to "zh"
+node index.js "paper.pdf" --page "2-4" --to "zh"
 ```
 
 参数说明：
 
 - `--chap`：只翻译指定章节，仅 EPUB 支持
+- `--page`：只翻译指定页码，仅 PDF 支持
 - `--from`：设置源语言
 - `--to`：设置目标语言
 - `--concurrency`：设置本次运行并发数，必须为正整数
@@ -182,6 +235,15 @@ node index.js "chapter.htm" --from "en" --to "fr"
 - `1,1-3`：混合选择
 - `'Blackhole'-'Gravity'`：按章节标题精确匹配起止范围
 
+### 页码选择语法
+
+`--page` 支持：
+
+- `1`：单页
+- `2-4`：闭区间范围
+- `1,3,5`：离散页码
+- `1,3-5`：混合选择
+
 ## 输入、输出与缓存
 
 输入文件可以放在：
@@ -200,6 +262,8 @@ node index.js "chapter.htm" --from "en" --to "fr"
 book_zh.epub
 book_fr.epub
 chapter_zh.html
+paper_zh.pdf
+paper_zh.html
 ```
 
 如果使用 `--chap`，输出文件会带章节选择后缀，例如：
@@ -208,11 +272,19 @@ chapter_zh.html
 book_chap-1-3_zh.epub
 ```
 
+如果使用 `--page`，PDF 输出和缓存会带页码选择后缀，例如：
+
+```text
+paper_page-2-4_zh.pdf
+paper_page-2-4_zh.html
+```
+
 缓存目录规则：
 
 - 整本 EPUB：`.cache_<文件名>/`
 - 指定章节 EPUB：`.cache_<文件名>_chap-<selector>/`
 - 单 HTML：`.cache_<文件名>_html/`
+- PDF：`.cache_<文件名>_pdf/`；如果用了 `--page`，则为 `.cache_<文件名>_page-<selector>_pdf/`，其中包含提取和回填用的 JSON 中间文件
 
 默认情况下任务结束后会清理缓存和日志。加上 `--debug` 后会保留：
 
