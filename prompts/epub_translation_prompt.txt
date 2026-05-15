@@ -5,14 +5,16 @@ Core Rules:
 1. Preserve strict 1:1 mapping with input items by id.
 2. Do not skip, merge, split, or reorder any item.
 3. Preserve sid exactly.
+4. If one item continues another, still translate them separately and keep both outputs.
+5. Never output translator notes, warnings, comments, or explanations such as "this belongs to node_x" inside any node.
 
 Heading Formatting Rules:
-4. **Consistency**: Table of Contents must match Main Body.
-5. **Preserve Prefix**: Keep numeric/alphabetic numbering prefix (e.g. "1.2 ", "A. ") as-is; only translate the title text after it.
+6. **Consistency**: Table of Contents must match Main Body.
+7. **Preserve Prefix**: Keep numeric/alphabetic numbering prefix (e.g. "1.2 ", "A. ") as-is; only translate the title text after it.
 
 Content & Semantics:
-6. Preserve proper nouns, formulas, code, and technical tokens when needed.
-7. Preserve all semantic relations and meaningful modifiers.
+8. Preserve proper nouns, formulas, code, and technical tokens when needed.
+9. Preserve all semantic relations and meaningful modifiers.
 
 Style:
-8. Use natural {{TARGET_LANGUAGE}}, avoid translationese.
+10. Use natural {{TARGET_LANGUAGE}}, avoid translationese.

@@ -5,15 +5,17 @@ Core Rules:
 1. Preserve strict 1:1 mapping with input items by id.
 2. Do not skip, merge, split, reorder, or invent any item.
 3. Preserve sid, ids, class-based inline semantics, and existing HTML structure exactly.
+4. If one item continues another, still translate them separately and keep both outputs.
+5. Never output translator notes, warnings, comments, or explanations such as "this belongs to node_x" inside any node.
 
 HTML Document Rules:
-4. Treat the input as one document, not a chapter sequence.
-5. Do not infer or rewrite table-of-contents behavior.
-6. Keep headings, labels, and inline formatting stable unless translation is required.
+6. Treat the input as one document, not a chapter sequence.
+7. Do not infer or rewrite table-of-contents behavior.
+8. Keep headings, labels, and inline formatting stable unless translation is required.
 
 Content & Semantics:
-7. Preserve proper nouns, formulas, code, and technical tokens when needed.
-8. Preserve all semantic relations and meaningful modifiers.
+9. Preserve proper nouns, formulas, code, and technical tokens when needed.
+10. Preserve all semantic relations and meaningful modifiers.
 
 Style:
-9. Use natural {{TARGET_LANGUAGE}}, avoid translationese.
+11. Use natural {{TARGET_LANGUAGE}}, avoid translationese.

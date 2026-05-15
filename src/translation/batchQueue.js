@@ -8,6 +8,39 @@ const previewText = (text, maxLength = 300) => {
     return `${normalized.slice(0, maxLength)}...`;
 };
 
+const TRANSLATION_NOTE_PATTERNS = [
+    /^[（(]?\s*(?:注|NOTE)\s*[:：]/i,
+    /\bnode[_\s-]?\d+\b/i,
+    /\bsid\b/i,
+    /(?:按规则|严格保留|不合并|不调整|原文此处编号有误)/,
+];
+const TRANSLATION_SHORTHAND_PATTERNS = [
+    /^(?:同上|同前|如上|上同|见上|见前)(?:[。．.!！?？]*)$/,
+    /^(?:ibid\.?|same as above|see above|same as prior)(?:[.?!]*)$/i,
+];
+
+const normalizeNodeText = (value) => String(value ?? "").replace(/\s+/g, " ").trim();
+
+const extractTextFromFragment = (html) =>
+    normalizeNodeText(cheerio.load(`<root>${String(html ?? "")}</root>`, { xmlMode: true }).text());
+
+const isTranslationMetaNote = (value) => {
+    const normalized = normalizeNodeText(value);
+    if (!normalized) return false;
+    const matchCount = TRANSLATION_NOTE_PATTERNS.filter((pattern) => pattern.test(normalized)).length;
+    if (matchCount >= 2) return true;
+    if (matchCount >= 1 && normalized.length <= 120 && ["（", "(", "["].includes(normalized.slice(0, 1))) {
+        return true;
+    }
+    return false;
+};
+
+const isTranslationShorthand = (value) => {
+    const normalized = normalizeNodeText(value);
+    if (!normalized) return false;
+    return TRANSLATION_SHORTHAND_PATTERNS.some((pattern) => pattern.test(normalized));
+};
+
 // =================== 批处理队列工厂 ===================
 export const createBatchQueue = (aiProvider, logger) => {
     const queue = new Queue(
@@ -66,6 +99,29 @@ export const createBatchQueue = (aiProvider, logger) => {
                         if (!processedContent) {
                             missingNodeIds.push(node.id);
                             continue;
+                        }
+
+                        const translatedPlainText = extractTextFromFragment(processedContent);
+                        const sourcePlainText = extractTextFromFragment(node.content);
+                        if (
+                            isTranslationMetaNote(translatedPlainText) &&
+                            !isTranslationMetaNote(sourcePlainText)
+                        ) {
+                            const metaNoteError = new Error(
+                                `Node ${node.id} returned a translator meta note instead of translated content.`,
+                            );
+                            metaNoteError.responsePreview = previewText(rawResponse);
+                            throw metaNoteError;
+                        }
+                        if (
+                            isTranslationShorthand(translatedPlainText) &&
+                            !isTranslationShorthand(sourcePlainText)
+                        ) {
+                            const shorthandError = new Error(
+                                `Node ${node.id} returned shorthand output instead of translated content.`,
+                            );
+                            shorthandError.responsePreview = previewText(rawResponse);
+                            throw shorthandError;
                         }
 
                         try {

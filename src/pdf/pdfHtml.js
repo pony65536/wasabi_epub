@@ -7,50 +7,125 @@ const escapeHtml = (value) =>
         .replace(/>/g, "&gt;")
         .replace(/"/g, "&quot;");
 
-const INLINE_FORMULA_PATTERNS = [
-    /[A-Za-z][A-Za-z0-9_]*\([^()\n]*\)/g,
-    /\b[A-Za-z][A-Za-z0-9_]*\s*=\s*(?:\([^()\n]{1,48}\)|[A-Za-z0-9_√]+(?:\s*[+\-*/]\s*[A-Za-z0-9_√()]+)+|[A-Za-z0-9_./^-]{1,24})/g,
-    /\b(?:\w+\s*[·*/+-]\s*)+\w+\b/g,
-    /\b[a-zA-Z]\d+(?:\s*,\s*\.\.\.\s*,\s*[a-zA-Z]\d+)+\b/g,
-    /\b[a-zA-Z]+_[a-zA-Z0-9]+\b/g,
-    /\b[a-zA-Z]\s*[A-Z](?:\s*[+\-*/]\s*[a-zA-Z0-9]+)+\b/g,
-    /\b(?:d|W|Q|K|V|x|y|z|h|f|g|n|m)_[a-zA-Z0-9]+\b/g,
-    /\b[A-Za-z][A-Za-z0-9_]*\^[A-Za-z0-9]+\b/g,
-    /\b[A-Za-z][A-Za-z0-9_]*\s*∈\s*[^，。；：,.]{1,80}/g,
-    /√\s*[A-Za-z][A-Za-z0-9_]*/g,
-];
-
 const INLINE_FORMULA_PLACEHOLDER_REGEX = /@@WASABI_INLINE_FORMULA_\d+@@/g;
 const LATEX_DELIMITED_MATH_REGEX =
     /\\\[((?:.|\n)*?)\\\]|\\\(((?:.|\n)*?)\\\)|\$\$([\s\S]*?)\$\$|(^|[^\\])\$([^$\n]+?)\$(?=$|[^\\$])/g;
+const TRANSLATION_NOTE_PATTERNS = [
+    /^[（(]?\s*(?:注|NOTE)\s*[:：]/i,
+    /\bnode[_\s-]?\d+\b/i,
+    /\bsid\b/i,
+    /(?:按规则|严格保留|不合并|不调整|原文此处编号有误)/,
+];
+
+const fallbackDefaultStyle = (block) => {
+    const fontRole =
+        String(block?.defaultStyle?.fontRole || "") ||
+        (String(block?.role || "") === "heading" ? "heading" : "body");
+    const preferredStyle =
+        String(block?.preferredTextStyle || "") ||
+        (Boolean(block?.hasBoldLike) || fontRole === "heading" ? "bold" : "normal");
+    return {
+        fontRole,
+        familyClass: String(block?.styleFamilyClass || "serif"),
+        weight:
+            preferredStyle === "bold" || preferredStyle === "bold_italic" || fontRole === "heading"
+                ? "bold"
+                : "regular",
+        italic: preferredStyle === "italic" || preferredStyle === "bold_italic",
+        mono: preferredStyle === "monospace" || fontRole === "code",
+    };
+};
+
+const shouldTagWholeHeadingStyle = (block) =>
+    String(block?.role || "") === "heading" &&
+    String(fallbackDefaultStyle(block)?.weight || "") === "bold";
+
+const buildStyleMarkerMap = (block) => {
+    if (!shouldTagWholeHeadingStyle(block)) {
+        return {};
+    }
+    const defaultStyle = fallbackDefaultStyle(block);
+    return {
+        S0: {
+            kind: "text_style",
+            familyClass: String(defaultStyle.familyClass || "serif"),
+            weight: String(defaultStyle.weight || "bold"),
+            italic: Boolean(defaultStyle.italic),
+            mono: Boolean(defaultStyle.mono),
+            fontRole: String(defaultStyle.fontRole || "heading"),
+        },
+    };
+};
+
+const buildPdfTranslationSourceText = (block, blocksById) => {
+    const blockText = String(block?.text ?? "");
+    const dropCap = block?.dropCap;
+    if (!dropCap || typeof dropCap !== "object") {
+        return blockText;
+    }
+    const sourceBlockId = String(dropCap.sourceBlockId || "");
+    if (!sourceBlockId) {
+        return blockText;
+    }
+    const sourceBlock = blocksById.get(sourceBlockId);
+    const leadText = String(sourceBlock?.text ?? "");
+    if (!leadText) {
+        return blockText;
+    }
+    if (blockText.startsWith(leadText)) {
+        return blockText;
+    }
+    return `${leadText}${blockText}`;
+};
+
+const wrapWithStyleMarkers = (html, styleMarkers) => {
+    if (!html || !styleMarkers?.S0) {
+        return html;
+    }
+    return `<span data-wasabi-style-marker="S0">${html}</span>`;
+};
 
 const protectInlineFormula = (text) => {
     const placeholders = {};
-    let protectedText = String(text ?? "");
+    const source = String(text ?? "");
     let counter = 0;
+    let lastIndex = 0;
+    const fragments = [];
 
-    for (const pattern of INLINE_FORMULA_PATTERNS) {
-        protectedText = protectedText.replace(pattern, (match) => {
-            const normalized = String(match ?? "").trim();
-            if (!normalized || normalized.length < 3) return match;
-            if (normalized.includes("@@WASABI_INLINE_FORMULA_")) return match;
-            const key = `@@WASABI_INLINE_FORMULA_${counter}@@`;
-            counter += 1;
-            placeholders[key] = normalized;
-            return key;
-        });
-    }
-
-    let protectedHtml = escapeHtml(protectedText);
-    for (const [key, value] of Object.entries(placeholders)) {
-        const escapedKey = escapeHtml(key);
-        const escapedValue = escapeHtml(value);
-        protectedHtml = protectedHtml.split(escapedKey).join(
-            `<span data-wasabi-inline-formula="${escapedKey}" translate="no">${escapedValue}</span>`,
+    LATEX_DELIMITED_MATH_REGEX.lastIndex = 0;
+    let match;
+    while ((match = LATEX_DELIMITED_MATH_REGEX.exec(source)) !== null) {
+        const fullMatch = match[0];
+        const matchIndex = match.index;
+        const prefix = typeof match[4] === "string" ? match[4] || "" : "";
+        const prefixLength = prefix ? prefix.length : 0;
+        const visibleText = stripLatexMathDelimiters(fullMatch).trim();
+        if (!visibleText) {
+            continue;
+        }
+        const textStart = matchIndex + prefixLength;
+        const leadingText = source.slice(lastIndex, textStart);
+        if (leadingText) {
+            fragments.push(escapeHtml(leadingText));
+        }
+        const key = `@@WASABI_INLINE_FORMULA_${counter}@@`;
+        counter += 1;
+        placeholders[key] = visibleText;
+        fragments.push(
+            `<span data-wasabi-inline-formula="${escapeHtml(key)}" translate="no">${escapeHtml(visibleText)}</span>`,
         );
+        lastIndex = matchIndex + fullMatch.length;
     }
 
-    return { protectedHtml, placeholders };
+    if (Object.keys(placeholders).length === 0) {
+        return { protectedHtml: escapeHtml(source), placeholders };
+    }
+
+    const trailing = source.slice(lastIndex);
+    if (trailing) {
+        fragments.push(escapeHtml(trailing));
+    }
+    return { protectedHtml: fragments.join(""), placeholders };
 };
 
 const buildLineBasedFormulaMarkup = (block) => {
@@ -75,6 +150,8 @@ const buildLineBasedFormulaMarkup = (block) => {
                     text: itemText,
                     bbox: Array.isArray(item?.bbox) ? item.bbox : null,
                     lineBBox: Array.isArray(line?.bbox) ? line.bbox : null,
+                    font: String(item?.font ?? ""),
+                    flags: Number(item?.flags ?? 0),
                 };
                 lineHtml += `<span data-wasabi-inline-formula="${escapeHtml(key)}" translate="no">${escapeHtml(itemText)}</span>`;
                 continue;
@@ -105,6 +182,17 @@ const stripLatexMathDelimiters = (text) =>
         .replace(/\\\(((?:.|\n)*?)\\\)/g, "$1")
         .replace(/\$\$([\s\S]*?)\$\$/g, "$1")
         .replace(/(^|[^\\])\$([^$\n]+?)\$(?=$|[^\\$])/g, "$1$2");
+
+const isTranslationMetaNote = (value) => {
+    const normalized = String(value ?? "").replace(/\s+/g, " ").trim();
+    if (!normalized) return false;
+    const matchCount = TRANSLATION_NOTE_PATTERNS.filter((pattern) => pattern.test(normalized)).length;
+    if (matchCount >= 2) return true;
+    if (matchCount >= 1 && normalized.length <= 120 && ["（", "(", "["].includes(normalized.slice(0, 1))) {
+        return true;
+    }
+    return false;
+};
 
 const orderedPlaceholderKeys = (placeholders = {}) =>
     Object.keys(placeholders).sort((a, b) => {
@@ -138,38 +226,88 @@ const restoreLatexDelimitedSegmentsToPlaceholders = (text, placeholders = {}) =>
     );
 };
 
-const extractTranslatedText = ($, node, placeholders) => {
+const extractTranslatedTextAndStyles = ($, node, placeholders, styleMarkers, state) => {
     if (node.type === "text") {
-        return node.data || "";
+        const text = node.data || "";
+        if (!text) return;
+        const start = state.text.length;
+        state.text += text;
+        const activeMarker = state.activeStyleMarkers[state.activeStyleMarkers.length - 1];
+        if (activeMarker) {
+            const existing = state.styleRuns[state.styleRuns.length - 1];
+            if (existing && existing.markerId === activeMarker && existing.end === start) {
+                existing.end = state.text.length;
+            } else {
+                state.styleRuns.push({ markerId: activeMarker, start, end: state.text.length });
+            }
+        }
+        return;
     }
     if (node.type !== "tag") {
-        return "";
+        return;
     }
 
     const formulaKey = $(node).attr("data-wasabi-inline-formula");
     if (formulaKey && placeholders[formulaKey]) {
-        return formulaKey;
+        const start = state.text.length;
+        state.text += formulaKey;
+        const activeMarker = state.activeStyleMarkers[state.activeStyleMarkers.length - 1];
+        if (activeMarker) {
+            const existing = state.styleRuns[state.styleRuns.length - 1];
+            if (existing && existing.markerId === activeMarker && existing.end === start) {
+                existing.end = state.text.length;
+            } else {
+                state.styleRuns.push({ markerId: activeMarker, start, end: state.text.length });
+            }
+        }
+        return;
     }
 
-    return $(node)
+    const styleMarker = $(node).attr("data-wasabi-style-marker");
+    if (styleMarker && styleMarkers?.[styleMarker]) {
+        state.activeStyleMarkers.push(styleMarker);
+    }
+
+    $(node)
         .contents()
         .toArray()
-        .map((child) => extractTranslatedText($, child, placeholders))
-        .join("");
+        .forEach((child) =>
+            extractTranslatedTextAndStyles(
+                $,
+                child,
+                placeholders,
+                styleMarkers,
+                state,
+            ),
+        );
+
+    if (styleMarker && styleMarkers?.[styleMarker]) {
+        state.activeStyleMarkers.pop();
+    }
 };
 
 export const pdfJsonToHtml = (pdfJson) => {
     const title = pdfJson?.title || pdfJson?.sourceFile || "PDF Document";
     const blocks = Array.isArray(pdfJson?.blocks) ? pdfJson.blocks : [];
+    const blocksById = new Map(blocks.map((block) => [String(block.id), block]));
     const body = blocks
-        .filter((block) => !block.preserveOriginal)
+        .filter(
+            (block) =>
+                !block.preserveOriginal &&
+                block.blockType !== "reference_block" &&
+                block.doclingLabel !== "reference",
+        )
         .map((block) => {
             const tag = block.role === "heading" ? "h2" : "p";
+            const sourceText = buildPdfTranslationSourceText(block, blocksById);
             const lineBased = buildLineBasedFormulaMarkup(block);
             const { protectedHtml, placeholders } =
-                lineBased || protectInlineFormula(block.text);
+                lineBased || protectInlineFormula(sourceText);
+            const styleMarkers = buildStyleMarkerMap(block);
+            block.defaultStyle = block.defaultStyle || fallbackDefaultStyle(block);
             block.inlineFormulaPlaceholders = placeholders;
-            return `<${tag} data-pdf-block-id="${escapeHtml(block.id)}" data-page="${escapeHtml(block.page)}">${protectedHtml}</${tag}>`;
+            block.styleMarkers = styleMarkers;
+            return `<${tag} data-pdf-block-id="${escapeHtml(block.id)}" data-page="${escapeHtml(block.page)}">${wrapWithStyleMarkers(protectedHtml, styleMarkers)}</${tag}>`;
         })
         .join("\n");
 
@@ -193,20 +331,53 @@ export const applyTranslatedHtmlToPdfJson = (pdfJson, translatedHtml) => {
         const id = $(el).attr("data-pdf-block-id");
         const block = blocksById.get(String(id));
         if (!block) return;
+        const extractionState = {
+            text: "",
+            styleRuns: [],
+            activeStyleMarkers: [],
+        };
+        extractTranslatedTextAndStyles(
+            $,
+            el,
+            block.inlineFormulaPlaceholders || {},
+            block.styleMarkers || {},
+            extractionState,
+        );
         const translatedText = stripLatexMathDelimiters(
             restoreLatexDelimitedSegmentsToPlaceholders(
-                extractTranslatedText(
-                    $,
-                    el,
-                    block.inlineFormulaPlaceholders || {},
-                ),
+                extractionState.text,
                 block.inlineFormulaPlaceholders || {},
             ),
         ).replace(/\s+/g, " ").trim();
         if (translatedText && INLINE_FORMULA_PLACEHOLDER_REGEX.test(translatedText)) {
             INLINE_FORMULA_PLACEHOLDER_REGEX.lastIndex = 0;
         }
-        if (translatedText) block.translatedText = translatedText;
+        if (translatedText && isTranslationMetaNote(translatedText)) {
+            block.translationMetaNote = translatedText;
+            block.preserveOriginal = true;
+            block.preserveReason = "translation_meta_note";
+        } else if (translatedText) {
+            block.translatedText = translatedText;
+            if (block.translationMetaNote) delete block.translationMetaNote;
+            if (block.preserveReason === "translation_meta_note") {
+                delete block.preserveReason;
+                delete block.preserveOriginal;
+            }
+        }
+        if (Array.isArray(extractionState.styleRuns) && extractionState.styleRuns.length > 0) {
+            block.translatedStyleRuns = extractionState.styleRuns
+                .map((run) => {
+                    const marker = (block.styleMarkers || {})[run.markerId];
+                    if (!marker) return null;
+                    return {
+                        markerId: run.markerId,
+                        start: run.start,
+                        end: run.end,
+                        ...marker,
+                    };
+                })
+                .filter(Boolean);
+        }
     });
 
     return pdfJson;

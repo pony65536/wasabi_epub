@@ -1,9 +1,12 @@
 node_modules
 *.epub
 *.html
+*.pdf
 .env
 log
 package-lock.json
 .cache*
 input
 output
+.claude
+__pycache__

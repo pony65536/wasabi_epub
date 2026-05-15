@@ -384,7 +384,18 @@ def rebuild_pdf_graphic_layers(
                 )
 
         output_pdf.parent.mkdir(parents=True, exist_ok=True)
-        out.save(output_pdf, garbage=4, deflate=True)
+        try:
+            out.subset_fonts()
+        except Exception:
+            out.subset_fonts(fallback=True)
+        out.save(
+            output_pdf,
+            garbage=4,
+            deflate=True,
+            deflate_images=True,
+            deflate_fonts=True,
+            use_objstms=1,
+        )
 
     finally:
         out.close()

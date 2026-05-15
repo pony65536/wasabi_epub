@@ -24,6 +24,10 @@ const HTML_TRANSLATION_PROMPT_TEMPLATE = fs.readFileSync(
     path.resolve(__dirname, "../../prompts/html_translation_prompt.txt"),
     "utf8",
 );
+const PDF_TRANSLATION_PROMPT_TEMPLATE = fs.readFileSync(
+    path.resolve(__dirname, "../../prompts/pdf_translation_prompt.txt"),
+    "utf8",
+);
 
 function findContentRoot($) {
     const selectors = [
@@ -676,6 +680,9 @@ const getTranslationPromptTemplate = (translationMode) => {
     if (translationMode === "html") {
         return HTML_TRANSLATION_PROMPT_TEMPLATE;
     }
+    if (translationMode === "pdf") {
+        return PDF_TRANSLATION_PROMPT_TEMPLATE;
+    }
     return EPUB_TRANSLATION_PROMPT_TEMPLATE;
 };
 
@@ -823,7 +830,10 @@ const enqueueChapterTranslation = (
     });
 
     const dispatchRound = async (nodes, processor) => {
-        const batches = splitIntoBatches(nodes);
+        const batches =
+            translationMode === "pdf"
+                ? nodes.map((node) => [node])
+                : splitIntoBatches(nodes);
         return Promise.all(
             dispatchBatches(batches, $, processor, batchQueue, logger),
         );
