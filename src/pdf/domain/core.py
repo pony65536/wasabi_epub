@@ -117,6 +117,11 @@ ARXIV_METADATA_REGEX = re.compile(
     r"^arxiv:\d{4}\.\d{4,5}(?:v\d+)?\s+\[[A-Za-z.\-]+\]\s+\d{1,2}\s+[A-Z][a-z]{2}\s+\d{4}$",
     flags=re.IGNORECASE,
 )
+SHORT_BYLINE_METADATA_REGEX = re.compile(
+    r"^[A-Z][A-Za-zÀ-ÖØ-öø-ÿ.'\-]+(?:\s+[A-Z][A-Za-zÀ-ÖØ-öø-ÿ.'\-]+){1,3}\s+"
+    r"writes\s+for\s+.+?\s+from\s+.+$",
+    flags=re.IGNORECASE,
+)
 PDF_BLOCKS_SCHEMA_VERSION = 2
 CJK_FONT_TEXT_REGEX = re.compile(
     r"[\u00b7\u2013\u2014\u2018\u2019\u201c\u201d\u2026\u3000-\u303f\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uff00-\uffef]"
@@ -1282,6 +1287,27 @@ def normalize_wrap_line_templates(block: Optional[Dict[str, Any]]) -> List[Dict[
     return normalized_templates
 
 
+def has_pathological_narrow_tail_template(block: Optional[Dict[str, Any]]) -> bool:
+    templates = normalize_wrap_line_templates(block)
+    if len(templates) < 2:
+        return False
+    widths = [max(float(item.get("width") or 0.0), 0.0) for item in templates]
+    widths = [width for width in widths if width > 0.0]
+    if len(widths) < 2:
+        return False
+
+    widest = max(widths)
+    narrowest = min(widths)
+    if widest <= 0.0:
+        return False
+
+    font_size = max(float((block or {}).get("fontSize") or 0.0), 1.0)
+    narrow_ratio = narrowest / widest
+    if narrow_ratio > 0.42:
+        return False
+    return narrowest <= max(font_size * 6.4, 60.0)
+
+
 def resolve_block_line_bounds(
     rect,
     block: Optional[Dict[str, Any]],
@@ -1684,6 +1710,11 @@ def wrap_text_by_source_line_breaks(
                     current_units += token_units
                     first_token_in_segment = False
                     continue
+                if is_hanging_punctuation_token(token_text) and overflow_units <= 1.6:
+                    current += token_text
+                    current_units += token_units
+                    first_token_in_segment = False
+                    continue
                 lines.append(current.rstrip())
                 current = token.lstrip()
                 current_units = estimate_text_units(current)
@@ -1706,6 +1737,12 @@ def should_preserve_source_line_breaks(
     font_role: str,
 ) -> bool:
     if should_use_body_bbox_wrap(block, font_role):
+        return False
+    if (
+        str(block.get("blockType") or "") == "metadata"
+        and str(block.get("layoutIntent") or "") == "structured_fields"
+        and has_pathological_narrow_tail_template(block)
+    ):
         return False
     if block.get("layoutIntent") == "note_paragraph" and not is_footnote_block(block):
         return False
@@ -2624,6 +2661,48 @@ def render_text_line_specs(
             overlay=True,
         )
     return True
+
+
+def is_short_byline_metadata_block(block: Dict[str, Any]) -> bool:
+    text = normalize_text(block.get("text") or "")
+    if not text:
+        return False
+    if str(block.get("blockType") or "") not in {"metadata", "page_header", "page_footer"}:
+        return False
+    if len(text) > 160:
+        return False
+    if not SHORT_BYLINE_METADATA_REGEX.match(text):
+        return False
+
+    layout_lines = block.get("layoutLines") or []
+    if len(layout_lines) < 1 or len(layout_lines) > 3:
+        return False
+
+    first_items = (layout_lines[0] or {}).get("items", []) or []
+    first_text_items = [
+        item
+        for item in first_items
+        if item.get("type") == "text" and normalize_text(str(item.get("text", "") or ""))
+    ]
+    if not first_text_items:
+        return False
+    if not any(bool(item.get("isBoldLike")) for item in first_text_items):
+        return False
+
+    has_italic_tail = False
+    for line in layout_lines:
+        for item in (line or {}).get("items", []) or []:
+            if item.get("type") != "text":
+                continue
+            item_text = normalize_text(str(item.get("text", "") or ""))
+            if not item_text:
+                continue
+            if item.get("isItalicLike"):
+                has_italic_tail = True
+                break
+        if has_italic_tail:
+            break
+    return has_italic_tail
 def estimate_formula_placeholder_width(metadata: Dict[str, Any], font_size: float, block_font_size: float) -> float:
     if not isinstance(metadata, dict):
         fallback_text = str(metadata or "")

@@ -379,6 +379,25 @@ def is_page_number_block(block: Dict[str, Any]) -> bool:
     return bool(re.fullmatch(r"\d{1,3}", text))
 
 
+def is_journal_footer_metadata_block(block: Dict[str, Any]) -> bool:
+    text = core.normalize_text(block.get("text") or "")
+    if not text:
+        return False
+    page_height = max(float(block.get("pageHeight") or 1.0), 1.0)
+    y0 = float((block.get("bbox") or [0, 0, 0, 0])[1])
+    if y0 < page_height * 0.94:
+        return False
+
+    compact = re.sub(r"[^A-Za-z0-9]+", "", text.upper())
+    if not compact:
+        return False
+
+    has_journal_marker = "NATURE" in compact or "VOL" in compact
+    has_date_or_correction = "CORRECTED" in compact or "SEPTEMBER" in compact
+    has_page_number = bool(re.search(r"\b\d{1,3}\b", text))
+    return has_journal_marker and (has_date_or_correction or has_page_number)
+
+
 def is_margin_metadata_block(block: Dict[str, Any]) -> bool:
     text = core.normalize_text(block["text"])
     if not text:
@@ -448,6 +467,9 @@ def detect_preserved_peripheral_block_ids(
                 preserved_ids.add(block["id"])
                 continue
             if signature in repeated_bottom and y0 >= page_height * 0.89:
+                preserved_ids.add(block["id"])
+                continue
+            if is_journal_footer_metadata_block(block):
                 preserved_ids.add(block["id"])
                 continue
             if signature in repeated_side and is_side_marginalia_block(block):
@@ -528,6 +550,49 @@ def detect_running_header_label_regions(source_doc) -> Dict[int, List[List[float
         for cluster in clusters:
             if len(cluster["texts"]) >= 2:
                 regions_by_page.setdefault(page_index, []).append(core.bbox_with_margin(cluster["bbox"], 4.0))
+
+    return regions_by_page
+
+
+def build_preserved_peripheral_regions_by_page(
+    pages_blocks: List[List[Dict[str, Any]]],
+) -> Dict[int, List[List[float]]]:
+    regions_by_page: Dict[int, List[List[float]]] = {}
+
+    for page_index, page_blocks in enumerate(pages_blocks):
+        top_blocks: List[Dict[str, Any]] = []
+        bottom_blocks: List[Dict[str, Any]] = []
+        side_blocks: List[Dict[str, Any]] = []
+
+        for block in page_blocks:
+            if str(block.get("preserveReason") or "") != "peripheral_repeat":
+                continue
+            bbox = block.get("bbox") or []
+            if len(bbox) != 4:
+                continue
+            page_height = max(float(block.get("pageHeight") or 1.0), 1.0)
+            y0 = float(bbox[1])
+            y1 = float(bbox[3])
+            if y1 <= page_height * 0.14:
+                top_blocks.append(block)
+            elif y0 >= page_height * 0.86:
+                bottom_blocks.append(block)
+            elif is_side_marginalia_block(block):
+                side_blocks.append(block)
+
+        def append_group(blocks: List[Dict[str, Any]], margin: float) -> None:
+            if not blocks:
+                return
+            region = core.union_bboxes([list(block["bbox"]) for block in blocks])
+            if region is None:
+                return
+            regions_by_page.setdefault(page_index, []).append(
+                core.bbox_with_margin(region, margin)
+            )
+
+        append_group(top_blocks, 4.0)
+        append_group(bottom_blocks, 4.0)
+        append_group(side_blocks, 4.0)
 
     return regions_by_page
 

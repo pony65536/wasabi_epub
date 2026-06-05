@@ -6,8 +6,7 @@ Core Rules:
 2. Do not skip, merge, split, reorder, or invent any item.
 3. Translate each block independently, even if one block continues the previous block.
 4. Return only translated text inside each node. Never add notes, comments, warnings, or explanations.
-5. Never use shorthand placeholders such as "同上", "如上", "见上", "same as above", or "ibid." unless the source block itself says so.
-6. Preserve formulas, code, technical tokens, and proper nouns when needed.
+5. Preserve formulas, code, technical tokens, and proper nouns when needed.
 
 Style:
-7. Use natural {{TARGET_LANGUAGE}}, avoid translationese.
+6. Use natural {{TARGET_LANGUAGE}}, avoid translationese.

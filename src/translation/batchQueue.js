@@ -14,15 +14,19 @@ const TRANSLATION_NOTE_PATTERNS = [
     /\bsid\b/i,
     /(?:按规则|严格保留|不合并|不调整|原文此处编号有误)/,
 ];
-const TRANSLATION_SHORTHAND_PATTERNS = [
-    /^(?:同上|同前|如上|上同|见上|见前)(?:[。．.!！?？]*)$/,
-    /^(?:ibid\.?|same as above|see above|same as prior)(?:[.?!]*)$/i,
-];
 
 const normalizeNodeText = (value) => String(value ?? "").replace(/\s+/g, " ").trim();
 
 const extractTextFromFragment = (html) =>
     normalizeNodeText(cheerio.load(`<root>${String(html ?? "")}</root>`, { xmlMode: true }).text());
+
+const shouldUseSingleNodePlainTextFallback = (batch, rawResponse) => {
+    if (!Array.isArray(batch) || batch.length !== 1) return false;
+    const normalized = String(rawResponse ?? "").trim();
+    if (!normalized) return false;
+    if (/<node\b/i.test(normalized)) return false;
+    return true;
+};
 
 const isTranslationMetaNote = (value) => {
     const normalized = normalizeNodeText(value);
@@ -33,12 +37,6 @@ const isTranslationMetaNote = (value) => {
         return true;
     }
     return false;
-};
-
-const isTranslationShorthand = (value) => {
-    const normalized = normalizeNodeText(value);
-    if (!normalized) return false;
-    return TRANSLATION_SHORTHAND_PATTERNS.some((pattern) => pattern.test(normalized));
 };
 
 // =================== 批处理队列工厂 ===================
@@ -86,11 +84,42 @@ export const createBatchQueue = (aiProvider, logger) => {
                     );
                     const updates = [];
                     const missingNodeIds = [];
+                    const singleNodePlainTextFallback =
+                        shouldUseSingleNodePlainTextFallback(batch, rawResponse)
+                            ? String(rawResponse ?? "").trim()
+                            : null;
 
                     for (const node of batch) {
                         const $node = $response(`node[id="${node.id}"]`);
 
                         if ($node.length === 0) {
+                            if (
+                                singleNodePlainTextFallback !== null &&
+                                batch.length === 1
+                            ) {
+                                const translatedPlainText = extractTextFromFragment(
+                                    singleNodePlainTextFallback,
+                                );
+                                const sourcePlainText = extractTextFromFragment(
+                                    node.content,
+                                );
+                                if (
+                                    isTranslationMetaNote(translatedPlainText) &&
+                                    !isTranslationMetaNote(sourcePlainText)
+                                ) {
+                                    const metaNoteError = new Error(
+                                        `Node ${node.id} returned a translator meta note instead of translated content.`,
+                                    );
+                                    metaNoteError.responsePreview =
+                                        previewText(rawResponse);
+                                    throw metaNoteError;
+                                }
+                                updates.push({
+                                    nodeId: node.id,
+                                    processedContent: singleNodePlainTextFallback,
+                                });
+                                continue;
+                            }
                             missingNodeIds.push(node.id);
                             continue;
                         }
@@ -112,16 +141,6 @@ export const createBatchQueue = (aiProvider, logger) => {
                             );
                             metaNoteError.responsePreview = previewText(rawResponse);
                             throw metaNoteError;
-                        }
-                        if (
-                            isTranslationShorthand(translatedPlainText) &&
-                            !isTranslationShorthand(sourcePlainText)
-                        ) {
-                            const shorthandError = new Error(
-                                `Node ${node.id} returned shorthand output instead of translated content.`,
-                            );
-                            shorthandError.responsePreview = previewText(rawResponse);
-                            throw shorthandError;
                         }
 
                         try {

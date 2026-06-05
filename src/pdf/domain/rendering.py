@@ -918,8 +918,10 @@ def layout_text_with_style_run_templates(
     queue_index = 0
     queue_remainder = ""
     template_index = 0
+    stalled_iterations = 0
 
     while queue_index < len(tokens) or queue_remainder:
+        state_before = (queue_index, queue_remainder)
         template = templates[min(template_index, len(templates) - 1)]
         line_bounds = resolve_block_line_bounds(rect, block, template_index)
         line_top = resolve_block_line_top(
@@ -1105,6 +1107,14 @@ def layout_text_with_style_run_templates(
 
         if not line_segments:
             break
+
+        state_after = (queue_index, queue_remainder)
+        if state_after == state_before:
+            stalled_iterations += 1
+            if stalled_iterations >= 1:
+                break
+        else:
+            stalled_iterations = 0
 
         visual_lines.append(
             {
@@ -1326,12 +1336,35 @@ def insert_source_clip_as_image(
     except Exception:
         return False
 
-def write_translated_block(
+
+def insert_source_clip_as_pdf(
+    page,
+    source_doc,
+    source_page_number: int,
+    dest_rect,
+    clip_rect,
+) -> bool:
+    if source_doc is None or dest_rect.is_empty or clip_rect.is_empty:
+        return False
+    try:
+        page.show_pdf_page(
+            dest_rect,
+            source_doc,
+            source_page_number,
+            clip=clip_rect,
+            overlay=True,
+        )
+        return True
+    except Exception:
+        return False
+
+def write_translated_block(
     page,
     block: Dict[str, Any],
     fitz,
     *,
     source_doc=None,
+    preserve_mode: str = "pdf",
     erase_mode: str = "redact",
     debug_visuals: bool = False,
 ) -> Optional[bool]:
@@ -1348,10 +1381,18 @@ def insert_source_clip_as_image(
             clip = source_doc[source_page_number].rect & rect
             if clip.is_empty:
                 return False
-            if insert_source_clip_as_image(page, source_doc, source_page_number, rect, clip):
+            if preserve_mode == "image":
+                return insert_source_clip_as_image(
+                    page,
+                    source_doc,
+                    source_page_number,
+                    rect,
+                    clip,
+                    zoom=4.0,
+                )
+            if insert_source_clip_as_pdf(page, source_doc, source_page_number, rect, clip):
                 return True
-            page.show_pdf_page(rect, source_doc, source_page_number, clip=clip, overlay=True)
-            return True
+            return False
         return None
 
     raw_translated = sanitize_translated_text(block.get("translatedText") or "")
@@ -1387,6 +1428,11 @@ def insert_source_clip_as_image(
     use_visual_style_reflow = (
         not block_has_uniform_visual_style(block)
         and str(block.get("blockType") or "") in {"heading", "metadata", "drop_cap"}
+        and not (
+            str(block.get("blockType") or "") == "metadata"
+            and str(block.get("layoutIntent") or "") == "structured_fields"
+            and has_pathological_narrow_tail_template(block)
+        )
     )
     use_uniform_block_style = (
         block_has_uniform_visual_style(block)
@@ -1416,32 +1462,38 @@ def insert_source_clip_as_image(
             debug_visuals=debug_visuals,
         )
     elif use_visual_style_reflow:
-        success = fit_textbox_with_mixed_line_span_styles(
-            page,
-            rect,
-            translated,
-            block,
-            base_font_size,
-            fitz,
-            min_font_size=min_font_size,
-        )
+        try:
+            success = fit_textbox_with_mixed_line_span_styles(
+                page,
+                rect,
+                translated,
+                block,
+                base_font_size,
+                fitz,
+                min_font_size=min_font_size,
+            )
+        except Exception:
+            success = False
 
     if not success and can_use_mixed:
-        success = fit_mixed_textbox(
-            page,
-            source_doc,
-            rect,
-            translated,
-            block,
-            base_font_size,
-            rotation,
-            fitz,
-            bold=bold,
-            min_font_size=min_font_size,
-            font_role=font_role,
-            debug_visuals=debug_visuals,
-            redact_before_write=(erase_mode == "redact"),
-        )
+        try:
+            success = fit_mixed_textbox(
+                page,
+                source_doc,
+                rect,
+                translated,
+                block,
+                base_font_size,
+                rotation,
+                fitz,
+                bold=bold,
+                min_font_size=min_font_size,
+                font_role=font_role,
+                debug_visuals=debug_visuals,
+                redact_before_write=(erase_mode == "redact"),
+            )
+        except Exception:
+            success = False
 
     if not success:
         use_literal_inline = (

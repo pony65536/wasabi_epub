@@ -49,12 +49,12 @@ const getPythonCandidates = () => {
     if (doclingPrefix) {
         condaCandidates.push({
             command: condaCommand,
-            args: ["run", "-p", doclingPrefix, "python"],
+            args: ["run", "--no-capture-output", "-p", doclingPrefix, "python"],
         });
     }
     condaCandidates.push({
         command: condaCommand,
-        args: ["run", "-n", "docling", "python"],
+        args: ["run", "--no-capture-output", "-n", "docling", "python"],
     });
 
     if (process.platform === "win32") {
@@ -98,11 +98,21 @@ const runPythonWithCandidate = (candidate, args, logger) =>
 
         let stdout = "";
         let stderr = "";
+        const streamOutput = (text, writer) => {
+            if (!text) return;
+            try {
+                writer.write(text);
+            } catch {}
+        };
         child.stdout.on("data", (chunk) => {
-            stdout += chunk.toString();
+            const text = chunk.toString();
+            stdout += text;
+            streamOutput(text, process.stdout);
         });
         child.stderr.on("data", (chunk) => {
-            stderr += chunk.toString();
+            const text = chunk.toString();
+            stderr += text;
+            streamOutput(text, process.stderr);
         });
         child.on("error", (error) => {
             reject({ type: "spawn", candidate, error, stdout, stderr });

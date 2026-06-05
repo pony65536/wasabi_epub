@@ -4,6 +4,8 @@ from domain.core import (
     detect_geometric_script_offset,
     dominant_font_size,
     has_private_use_garbage,
+    has_pathological_narrow_tail_template,
+    is_short_byline_metadata_block,
     is_display_formula_block,
     is_formula_heavy_text,
     is_formula_span,
@@ -14,5 +16,7 @@ from domain.core import (
     require_fitz,
     require_pikepdf,
     sanitize_translated_text,
+    should_preserve_source_line_breaks,
+    wrap_text_by_source_line_breaks,
 )
 from domain.layout import bbox_overlap_ratio, direction_to_rotation
