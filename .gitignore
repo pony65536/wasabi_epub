@@ -10,3 +10,5 @@ input
 output
 .claude
 __pycache__
+*.py[cod]
+*.pyc.*
