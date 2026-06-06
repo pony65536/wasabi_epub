@@ -9,6 +9,7 @@ package-lock.json
 input
 output
 .claude
+tests
 __pycache__
 *.py[cod]
 *.pyc.*
