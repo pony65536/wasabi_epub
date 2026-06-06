@@ -307,4 +307,4 @@ src/      程序源码
 src/pdf/  PDF 子模块
 ```
 
-如果你只想使用，不需要理解内部实现；如果你要继续改 PDF 流程，可以从 [src/pdf/README.md](./src/pdf/README.md) 开始看。
+如果你只想使用，不需要理解内部实现；如果你要继续改 PDF 流程，可以从 [src/pdf/README.md](./src/pdf/README.md) 开始看中文说明。
