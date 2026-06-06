@@ -3,6 +3,29 @@
 
 A command-line translation tool designed for long documents and subtitle workflows. Supports translating `EPUB`, `HTML`, `PDF`, `SRT`, and subtitle-bearing video files into a target language while preserving the original structure, chapter order, table of contents, layout, or subtitle tracks as faithfully as possible.
 
+## Demo
+
+Subtitle example (source / translated):
+
+<p align="center">
+  <img src="./assets/Snipaste_2026-04-06_20-20-52.jpg" alt="Subtitle demo source" width="45%" />
+  <img src="./assets/Snipaste_2026-04-06_20-19-30.jpg" alt="Subtitle demo translated" width="45%" />
+</p>
+
+Ebook example (source page / translated page):
+
+<p align="center">
+  <img src="./assets/Screenshot_2026-06-06-16-08-21-811_com.tencent.weread.jpg" alt="Ebook demo source" width="45%" />
+  <img src="./assets/Screenshot_2026-06-06-16-04-18-682_com.tencent.weread.jpg" alt="Ebook demo translated" width="45%" />
+</p>
+
+PDF example (source page / translated page):
+
+<p align="center">
+  <img src="./assets/Sample_pdf_en_page-0001.jpg" alt="Sample PDF English page" width="45%" />
+  <img src="./assets/Sample_pdf_zh_page-0001.jpg" alt="Sample PDF Chinese page" width="45%" />
+</p>
+
 ## Supported Input Formats
 
 - `EPUB`
