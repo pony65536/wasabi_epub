@@ -43,11 +43,15 @@ const isTranslationMetaNote = (value) => {
 export const createBatchQueue = (aiProvider, logger) => {
     const queue = new Queue(
         async (task, cb) => {
-            const { batch, $parent, processor } = task;
+            const { batch, $parent, processor, onTaskSuccess, onTaskFailure } = task;
             const resolvedPrompt =
-                typeof processor.prompt === "function"
-                    ? processor.prompt(batch)
-                    : processor.prompt;
+                batch.length === 1 && processor.singleNodePrompt
+                    ? typeof processor.singleNodePrompt === "function"
+                        ? processor.singleNodePrompt(batch[0])
+                        : processor.singleNodePrompt
+                    : typeof processor.prompt === "function"
+                      ? processor.prompt(batch)
+                      : processor.prompt;
             const MAX_ATTEMPTS = 3;
             let attempts = 0;
             let success = false;
@@ -59,16 +63,19 @@ export const createBatchQueue = (aiProvider, logger) => {
                     const mergeRegex =
                         /([A-Za-z])<(small|span|strong|em)[^>]*>([\s\S]*?)<\/\2>/gi;
 
-                    const batchInput = batch
-                        .map((n) => {
-                            const preProcessedContent = n.content.replace(
-                                mergeRegex,
-                                (match, p1, p2, p3) =>
-                                    !p3.includes("<") ? p1 + p3 : match,
-                            );
-                            return `<node id="${n.id}">${preProcessedContent}</node>`;
-                        })
-                        .join("\n");
+                    const batchInput =
+                        batch.length === 1 && processor.singleNodePrompt
+                            ? batch[0].content
+                            : batch
+                                  .map((n) => {
+                                      const preProcessedContent = n.content.replace(
+                                          mergeRegex,
+                                          (match, p1, p2, p3) =>
+                                              !p3.includes("<") ? p1 + p3 : match,
+                                      );
+                                      return `<node id="${n.id}">${preProcessedContent}</node>`;
+                                  })
+                                  .join("\n");
 
                     const rawResponse = cleanAIResponse(
                         await aiProvider.callAI(
@@ -182,13 +189,21 @@ export const createBatchQueue = (aiProvider, logger) => {
                     }
 
                     success = true;
+                    try {
+                        onTaskSuccess?.(batch);
+                    } catch {}
                     cb(null);
                 } catch (e) {
                     logger.write(
                         "ERROR",
                         `Batch Queue Attempt ${attempts} Failed: ${e.stack || e.message}${e.responsePreview ? `\nResponse Preview: ${e.responsePreview}` : ""}`,
                     );
-                    if (attempts >= MAX_ATTEMPTS) cb(e);
+                    if (attempts >= MAX_ATTEMPTS) {
+                        try {
+                            onTaskFailure?.(batch, e);
+                        } catch {}
+                        cb(e);
+                    }
                     else await new Promise((r) => setTimeout(r, 2000));
                 }
             }
@@ -208,15 +223,22 @@ export const createBatchQueue = (aiProvider, logger) => {
 
 // =================== 通用批处理逻辑 ===================
 const BATCH_SIZE_LIMIT = 5000;
+const SUBTITLE_BATCH_SIZE_LIMIT = 6000;
+const SUBTITLE_BATCH_NODE_LIMIT = 24;
 
-export const splitIntoBatches = (nodeList) => {
+export const splitIntoBatches = (nodeList, options = {}) => {
+    const {
+        sizeLimit = BATCH_SIZE_LIMIT,
+        nodeLimit = Number.POSITIVE_INFINITY,
+    } = options;
     const batches = [];
     let currentBatch = [];
     let currentLength = 0;
     for (const node of nodeList) {
         if (
-            currentLength + node.content.length > BATCH_SIZE_LIMIT &&
-            currentBatch.length > 0
+            currentBatch.length > 0 &&
+            (currentLength + node.content.length > sizeLimit ||
+                currentBatch.length >= nodeLimit)
         ) {
             batches.push(currentBatch);
             currentBatch = [];
@@ -229,12 +251,38 @@ export const splitIntoBatches = (nodeList) => {
     return batches;
 };
 
-export const dispatchBatches = (batches, $, processor, batchQueue, logger) =>
+export const getBatchingOptions = (translationMode) => {
+    if (translationMode === "subtitle") {
+        return {
+            sizeLimit: SUBTITLE_BATCH_SIZE_LIMIT,
+            nodeLimit: SUBTITLE_BATCH_NODE_LIMIT,
+        };
+    }
+    return {
+        sizeLimit: BATCH_SIZE_LIMIT,
+        nodeLimit: Number.POSITIVE_INFINITY,
+    };
+};
+
+export const dispatchBatches = (
+    batches,
+    $,
+    processor,
+    batchQueue,
+    logger,
+    options = {},
+) =>
     batches.map(
         (batch) =>
             new Promise((resolve) => {
                 batchQueue.queue
-                    .push({ batch, $parent: $, processor })
+                    .push({
+                        batch,
+                        $parent: $,
+                        processor,
+                        onTaskSuccess: options.onTaskSuccess,
+                        onTaskFailure: options.onTaskFailure,
+                    })
                     .on("finish", () => resolve({ ok: true, batch }))
                     .on("failed", (err) => {
                         logger.write(

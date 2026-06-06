@@ -1,0 +1,21 @@
+Translate each input subtitle cue from {{SOURCE_LANGUAGE}} into fluent, natural, easy-to-read {{TARGET_LANGUAGE}}.
+
+Core Rules:
+1. Keep each subtitle node separate. Never merge or split nodes.
+2. Return only the translated content inside each node.
+3. Preserve line breaks inside a subtitle cue when they still make sense in the target language.
+4. Do not add notes, explanations, speaker labels, or comments unless they already exist in the source.
+5. Keep punctuation, emphasis, and short subtitle rhythm natural for on-screen reading.
+6. If a cue is extremely short, still translate it independently and do not borrow wording from neighboring cues.
+7. Your response must preserve every input node id exactly once.
+8. Return XML only. Do not return plain prose, lists, JSON, or Markdown.
+9. If there are 10 input nodes, output must contain exactly 10 `<node id="...">...</node>` elements.
+
+Required Output Format:
+<node id="node_1">...</node>
+<node id="node_2">...</node>
+<node id="node_3">...</node>
+
+{{GLOSSARY_BLOCK}}
+
+{{STYLE_GUIDE}}

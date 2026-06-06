@@ -3,6 +3,7 @@ import fs from "fs";
 import { loadHtml } from "../utils.js";
 import {
     splitIntoBatches,
+    getBatchingOptions,
     dispatchBatches,
     collectFailedNodes,
 } from "./batchQueue.js";
@@ -26,6 +27,10 @@ const HTML_TRANSLATION_PROMPT_TEMPLATE = fs.readFileSync(
 );
 const PDF_TRANSLATION_PROMPT_TEMPLATE = fs.readFileSync(
     path.resolve(__dirname, "../../prompts/pdf_translation_prompt.txt"),
+    "utf8",
+);
+const SUBTITLE_TRANSLATION_PROMPT_TEMPLATE = fs.readFileSync(
+    path.resolve(__dirname, "../../prompts/subtitle_translation_prompt.txt"),
     "utf8",
 );
 
@@ -673,8 +678,77 @@ export const collectVisibleTextNodes = (
         .map(({ order, ...rest }) => rest);
 };
 
-const shouldBypassTranslation = (action) =>
-    action === "DROP" || action === "SKIP" || action === "PLACEHOLDER";
+const shouldBypassClassification = (classification, translationMode) => {
+    const action = classification?.action;
+    if (translationMode === "subtitle") {
+        if (classification?.reason === "empty") return true;
+        return action === "SKIP" || action === "PLACEHOLDER";
+    }
+    return action === "DROP" || action === "SKIP" || action === "PLACEHOLDER";
+};
+
+const buildSubtitleSingleNodePrompt = (sourceLanguage, targetLanguage) => `
+Translate this single subtitle cue from ${sourceLanguage} into fluent, natural, easy-to-read ${targetLanguage}.
+
+Rules:
+1. Translate only this exact cue.
+2. Return only the translated cue text, with no XML wrapper, no Markdown, and no explanation.
+3. Do not copy neighboring dialogue.
+4. Preserve line breaks only if they remain useful in the target language.
+5. Do not add comments, notes, or labels unless they already exist in the source.
+`.trim();
+
+const createTerminalProgressRenderer = () => {
+    const isDynamic =
+        Boolean(process.stdout?.isTTY) &&
+        typeof process.stdout.clearLine === "function" &&
+        typeof process.stdout.cursorTo === "function";
+    let active = false;
+    let lastLine = "";
+
+    const clearActiveLine = () => {
+        if (!isDynamic || !active) return;
+        process.stdout.clearLine(0);
+        process.stdout.cursorTo(0);
+        active = false;
+    };
+
+    return {
+        render(line) {
+            if (!isDynamic) {
+                console.log(line);
+                return;
+            }
+            const nextLine = String(line ?? "");
+            if (nextLine === lastLine) return;
+            process.stdout.clearLine(0);
+            process.stdout.cursorTo(0);
+            process.stdout.write(nextLine);
+            active = true;
+            lastLine = nextLine;
+        },
+        println(line) {
+            if (!isDynamic) {
+                console.log(line);
+                return;
+            }
+            clearActiveLine();
+            process.stdout.write(`${line}\n`);
+            lastLine = "";
+        },
+        finish(finalLine = null) {
+            if (!isDynamic) {
+                if (finalLine) console.log(finalLine);
+                return;
+            }
+            clearActiveLine();
+            if (finalLine) {
+                process.stdout.write(`${finalLine}\n`);
+            }
+            lastLine = "";
+        },
+    };
+};
 
 const getTranslationPromptTemplate = (translationMode) => {
     if (translationMode === "html") {
@@ -682,6 +756,9 @@ const getTranslationPromptTemplate = (translationMode) => {
     }
     if (translationMode === "pdf") {
         return PDF_TRANSLATION_PROMPT_TEMPLATE;
+    }
+    if (translationMode === "subtitle") {
+        return SUBTITLE_TRANSLATION_PROMPT_TEMPLATE;
     }
     return EPUB_TRANSLATION_PROMPT_TEMPLATE;
 };
@@ -703,6 +780,16 @@ const enqueueChapterTranslation = (
     debugMode = false,
 ) => {
     const $ = loadHtml(htmlContent);
+    let subtitleProgress = null;
+    const subtitleProgressRenderer =
+        translationMode === "subtitle" ? createTerminalProgressRenderer() : null;
+    const subtitleStatusLine = (line) => {
+        if (subtitleProgressRenderer) {
+            subtitleProgressRenderer.println(line);
+            return;
+        }
+        console.log(line);
+    };
 
     if (translationMode !== "html") {
         unwrapUselessSpans($, referencedIds, definedClasses);
@@ -761,7 +848,7 @@ const enqueueChapterTranslation = (
                 html: originalHtml,
             });
 
-            if (shouldBypassTranslation(classification.action)) {
+            if (shouldBypassClassification(classification, translationMode)) {
                 skippedNodeCount++;
                 const logEntry = buildClassificationLog(
                     nodeId,
@@ -796,6 +883,19 @@ const enqueueChapterTranslation = (
         return Promise.resolve($.xml());
     }
 
+    if (translationMode === "subtitle") {
+        subtitleProgress = {
+            totalNodes: nodesToTranslate.length,
+            completedNodes: 0,
+            completedBatches: 0,
+            failedBatches: 0,
+            nextReportAt: 0,
+        };
+        subtitleProgressRenderer.render(
+            `    - 🎞️ Subtitle progress: 0/${subtitleProgress.totalNodes} cues (0%)`,
+        );
+    }
+
     const makeProcessor = () => ({
         attrName: "data-t-id",
         prompt: (batchNodes) => {
@@ -819,6 +919,10 @@ const enqueueChapterTranslation = (
                 "{{TARGET_LANGUAGE}}",
                 translationConfig.targetLanguage,
             )
+                .replace(
+                    "{{SOURCE_LANGUAGE}}",
+                    translationConfig.sourceLanguage,
+                )
                 .replace("{{CHAPTER_TITLE}}", chapterTitle)
                 .replace("{{GLOSSARY_BLOCK}}", glossaryMarkdown)
                 .replace(
@@ -827,23 +931,102 @@ const enqueueChapterTranslation = (
                 )
                 .trim();
         },
+        singleNodePrompt:
+            translationMode === "subtitle"
+                ? () =>
+                      buildSubtitleSingleNodePrompt(
+                          translationConfig.sourceLanguage,
+                          translationConfig.targetLanguage,
+                      )
+                : null,
     });
 
     const dispatchRound = async (nodes, processor) => {
         const batches =
             translationMode === "pdf"
                 ? nodes.map((node) => [node])
-                : splitIntoBatches(nodes);
+                : splitIntoBatches(nodes, getBatchingOptions(translationMode));
+        const dispatchOptions =
+            translationMode === "subtitle"
+                ? {
+                      onTaskSuccess: (batch) => {
+                          if (!subtitleProgress) return;
+                          subtitleProgress.completedBatches += 1;
+                          subtitleProgress.completedNodes += batch.length;
+                          const percent = Math.min(
+                              100,
+                              Math.floor(
+                                  (subtitleProgress.completedNodes /
+                                      Math.max(subtitleProgress.totalNodes, 1)) *
+                                      100,
+                              ),
+                          );
+                          if (
+                              percent >= subtitleProgress.nextReportAt ||
+                              subtitleProgress.completedNodes >=
+                                  subtitleProgress.totalNodes
+                          ) {
+                              subtitleProgressRenderer.render(
+                                  `    - ⏱️ Subtitle progress: ${subtitleProgress.completedNodes}/${subtitleProgress.totalNodes} cues (${percent}%), batches=${subtitleProgress.completedBatches}, failedBatches=${subtitleProgress.failedBatches}`,
+                              );
+                              subtitleProgress.nextReportAt += 10;
+                          }
+                      },
+                      onTaskFailure: () => {
+                          if (!subtitleProgress) return;
+                          subtitleProgress.failedBatches += 1;
+                      },
+                  }
+                : {};
         return Promise.all(
-            dispatchBatches(batches, $, processor, batchQueue, logger),
+            dispatchBatches(
+                batches,
+                $,
+                processor,
+                batchQueue,
+                logger,
+                dispatchOptions,
+            ),
         );
+    };
+
+    const dispatchSplitRetryRounds = async (
+        failedNodes,
+        processor,
+        roundLabel,
+        maxRounds,
+    ) => {
+        let currentNodes = failedNodes;
+        for (let round = 1; round <= maxRounds; round++) {
+            if (currentNodes.length === 0) return;
+            const nextNodeLimit = Math.max(
+                2,
+                Math.ceil(currentNodes.length / Math.pow(2, round)),
+            );
+            subtitleStatusLine(
+                `    - ↘️ [${roundLabel}] Retrying ${currentNodes.length} failed node(s) in smaller subtitle batches (Round ${round}/${maxRounds}, nodeLimit=${nextNodeLimit})...`,
+            );
+            await Promise.all(
+                dispatchBatches(
+                    splitIntoBatches(currentNodes, {
+                        ...getBatchingOptions(translationMode),
+                        nodeLimit: nextNodeLimit,
+                    }),
+                    $,
+                    processor,
+                    batchQueue,
+                    logger,
+                ),
+            );
+            currentNodes = collectFailedNodes($, processor.attrName);
+        }
     };
 
     const fallbackToSingleNodes = async (roundLabel, processor) => {
         const failedNodes = collectFailedNodes($, processor.attrName);
         if (failedNodes.length === 0) return;
 
-        console.log(
+        subtitleStatusLine(
             `    - ↘️ [${roundLabel}] Falling back to single-node retries for ${failedNodes.length} node(s)...`,
         );
 
@@ -866,7 +1049,7 @@ const enqueueChapterTranslation = (
             "WARN",
             `Chapter "${roundLabel}" has ${unresolvedIds.length} unresolved node(s) after single-node fallback: ${unresolvedIds.join(", ")}`,
         );
-        console.log(
+        subtitleStatusLine(
             `    - ⚠️ [${roundLabel}] ${unresolvedIds.length} node(s) could not be translated and were left as source text.`,
         );
         for (const unresolvedNode of unresolvedNodes) {
@@ -882,14 +1065,19 @@ const enqueueChapterTranslation = (
         const processor = makeProcessor();
         await dispatchRound(nodes, processor);
 
-        const MAX_RETRY_ROUNDS = 3;
+        const MAX_RETRY_ROUNDS = translationMode === "subtitle" ? 2 : 3;
         for (let round = 1; round <= MAX_RETRY_ROUNDS; round++) {
             const failedNodes = collectFailedNodes($, processor.attrName);
             if (failedNodes.length === 0) break;
-            console.log(
+            subtitleStatusLine(
                 `    - ⚠️ [${roundLabel}] Retrying ${failedNodes.length} failed nodes (Round ${round}/${MAX_RETRY_ROUNDS})...`,
             );
             await dispatchRound(failedNodes, processor);
+        }
+
+        if (translationMode === "subtitle") {
+            const failedNodes = collectFailedNodes($, processor.attrName);
+            await dispatchSplitRetryRounds(failedNodes, processor, roundLabel, 2);
         }
 
         await fallbackToSingleNodes(roundLabel, processor);
@@ -897,6 +1085,11 @@ const enqueueChapterTranslation = (
 
     // 返回整个异步链，但 enqueue 动作是立即发生的（不等 await）
     return runRound(nodesToTranslate, chapterTitle).then(() => {
+        subtitleProgressRenderer?.finish(
+            subtitleProgress
+                ? `    - ✅ Subtitle progress: ${subtitleProgress.completedNodes}/${subtitleProgress.totalNodes} cues (100%), batches=${subtitleProgress.completedBatches}, failedBatches=${subtitleProgress.failedBatches}`
+                : null,
+        );
         $("[data-t-id]").removeAttr("data-t-id");
         if (debugMode && skippedNodeCount > 0) {
             console.log(
@@ -950,7 +1143,11 @@ export const performTranslation = async (
     translationMode = "epub",
     debugMode = false,
 ) => {
-    console.log("\n✍️ Step 4: Translating Book Content...");
+    console.log(
+        translationMode === "subtitle"
+            ? "\n✍️ Step 4: Translating Subtitle Content..."
+            : "\n✍️ Step 4: Translating Book Content...",
+    );
     let skipped = 0;
     const total = sortedChapters.length;
 

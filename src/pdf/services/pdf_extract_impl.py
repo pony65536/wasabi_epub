@@ -104,24 +104,6 @@ def _extract_text_object_text(instructions: List[Any]) -> str:
     return "".join(parts)
 
 
-def _is_acrobat_sensitive_quote_block(block: Dict[str, Any]) -> bool:
-    bbox = block.get("bbox") or []
-    if len(bbox) != 4:
-        return False
-    width = max(float(bbox[2]) - float(bbox[0]), 0.0)
-    height = max(float(bbox[3]) - float(bbox[1]), 0.0)
-    line_count = len(block.get("layoutLines") or [])
-    font_size = float(block.get("fontSize") or 0.0)
-    return (
-        str(block.get("blockType") or "") == "body"
-        and str(block.get("doclingLabel") or "") == "section_header"
-        and line_count <= 4
-        and font_size >= 20.0
-        and width >= 180.0
-        and height >= 40.0
-    )
-
-
 def _point_hits_block_bbox(point_bbox: List[float], block_bbox: List[float], margin: float = 4.0) -> bool:
     if len(point_bbox) != 4 or len(block_bbox) != 4:
         return False
@@ -728,11 +710,6 @@ def extract_blocks(
                     block["role"] = "preserved"
                     block["preserveReason"] = "formula_heavy"
                     block["blockType"] = "formula_display"
-            elif _is_acrobat_sensitive_quote_block(block):
-                block["preserveOriginal"] = True
-                block["role"] = "preserved"
-                block["preserveReason"] = "acrobat_sensitive_quote"
-                block["preserveStrategy"] = "pdf_object"
             if block.get("preserveOriginal"):
                 matched_xobjects = [
                     anchor
