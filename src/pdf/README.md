@@ -52,6 +52,18 @@ src/pdf/
 
 ## 回归检查
 
+安装 PDF Python 依赖：
+
+```powershell
+conda run -n docling python -m pip install -r src/pdf/requirements.txt
+```
+
+或在项目根目录直接执行：
+
+```powershell
+npm run pdf:install
+```
+
 建议每次修改 `src/pdf/` 后至少跑一次轻量回归：
 
 ```powershell
