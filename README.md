@@ -1,155 +1,95 @@
-# EPUB / HTML / PDF 自动翻译工具
+# Wasabi EPUB
 
-将 EPUB 电子书、单个 HTML 文档或 PDF 文档翻译为目标语言，尽量保留原有结构与排版。EPUB 模式会额外处理章节顺序、标题格式、目录同步和缓存续跑；HTML 模式适合单文件文档翻译；PDF 模式由 Python 负责提取 JSON 文本块和回填，翻译仍复用现有 Wasabi 引擎。
+一个面向长文档和字幕场景的命令行翻译工具，支持把 `EPUB`、`HTML`、`PDF`、`SRT` 和带字幕的视频翻译成目标语言，并尽量保留原始结构、章节顺序、目录、版式或字幕轨。
 
-## 功能概览
+## 支持的输入
 
-- 支持 `EPUB`、`HTML / HTM` 和 `PDF` 输入
-- CLI 支持输入文件、章节选择、页码选择、源语言、目标语言、并发和调试开关
-- 多 Provider 支持：`Gemini`、`Qwen`、`Mimo`、`OpenRouter`
-- 支持多语言工作流：英语、西班牙语、法语、俄语、简体中文、日语、韩语
-- 自动章节规划：识别 TOC，优先翻译正文，再处理前言/附录类内容
-- 标题格式分析与标准化：统一章节编号、目录标题等格式
-- 自动术语表生成：按源语言分词/切词后提取高频术语，再由 AI 筛选
-- 批处理、重试和单节点回退，提升长文翻译稳定性
-- 断点续传：章节级缓存，重跑时自动复用已完成结果
-- 提取阶段内容过滤：在进入翻译前丢弃明显 OCR 噪声，并为明显伪表格插入占位符
-- 翻译完成后自动同步 EPUB HTML TOC 和 NCX 导航
-- PDF 模式通过 PyMuPDF 提取 JSON 文本块，翻译后再回填到 PDF
+- `EPUB`
+- `HTML / HTM`
+- `PDF`
+- `SRT`
+- `MKV / MP4 / MOV / M4V / WEBM`
 
-## 目录结构
+## 主要能力
 
-```text
-wasabi_epub/
-├── index.js
-├── package.json
-├── requirements-pdf.txt
-├── src/
-│   ├── core.js
-│   ├── config.js
-│   ├── utils.js
-│   ├── agent.js
-│   ├── content/
-│   │   ├── content-classifier.js
-│   │   ├── glossary.js
-│   │   └── headings.js
-│   ├── epub/
-│   │   ├── epubSaver.js
-│   │   └── tocSync.js
-│   ├── pdf/
-│   │   ├── pdfBridge.js
-│   │   ├── pdfHtml.js
-│   │   └── translate_pdf.py
-│   ├── support/
-│   │   ├── cache.js
-│   │   ├── chapterSelection.js
-│   │   └── logger.js
-│   └── translation/
-│       ├── aiProvider.js
-│       ├── batchQueue.js
-│       └── translator.js
-├── prompts/
-│   ├── epub_translation_prompt.txt
-│   └── html_translation_prompt.txt
-├── input/
-├── output/
-└── log/
-```
-
-主要模块：
-
-- `index.js`：CLI 入口，解析参数并分流到 EPUB / HTML / PDF 流程
-- `src/core.js`：主流程编排，负责输入、缓存、标题规则、术语表、翻译、保存
-- `src/translation/translator.js`：节点收集、翻译批处理、重试和结果回写
-- `src/content/content-classifier.js`：提取阶段分类器，过滤 OCR 噪声、伪表格和公式样内容
-- `src/content/glossary.js`：按源语言做术语提取与 AI 筛选
-- `src/content/headings.js`：标题格式分析与全书标准化
-<<<<<<< ours
-<<<<<<< ours
-<<<<<<< ours
-<<<<<<< ours
-<<<<<<< ours
-<<<<<<< ours
-<<<<<<< ours
-- `prompts/epub_translation_prompt.txt`：EPUB 翻译提示词
-- `prompts/html_translation_prompt.txt`：HTML 翻译提示词
-=======
-- `src/pdf/`：PDF JSON 提取、HTML 中间层转换和翻译文本回填
->>>>>>> theirs
-=======
-- `src/pdf/`：PDF JSON 提取、HTML 中间层转换和翻译文本回填
->>>>>>> theirs
-=======
-- `src/pdf/`：PDF JSON 提取、HTML 中间层转换和翻译文本回填
->>>>>>> theirs
-=======
-- `src/pdf/`：PDF JSON 提取、HTML 中间层转换和翻译文本回填
->>>>>>> theirs
-=======
-- `src/pdf/`：PDF JSON 提取、HTML 中间层转换和翻译文本回填
->>>>>>> theirs
-=======
-- `src/pdf/`：PDF JSON 提取、HTML 中间层转换和翻译文本回填
->>>>>>> theirs
-=======
-- `src/pdf/`：PDF JSON 提取、HTML 中间层转换和翻译文本回填
->>>>>>> theirs
+- 按文件类型自动选择对应工作流
+- 支持 `Gemini`、`Qwen`、`Mimo`、`OpenRouter`
+- 支持章节选择，仅 `EPUB`
+- 支持页码选择，仅 `PDF`
+- 支持断点续跑，重跑时优先复用缓存
+- 支持术语表生成与标题格式标准化
+- 支持把视频中的字幕轨提取出来翻译，再封装回输出视频
+- `PDF` 模式会尽量保留图片、图形和非正文区域
 
 ## 环境要求
 
+基础要求：
+
 - Node.js 18+
 - npm
-- PDF 模式需要 Python 3 和 PyMuPDF：`python3 -m pip install -r requirements-pdf.txt`
-- PDF 回填中文时需要系统里有可用的 CJK 字体；默认会优先尝试宋体系字体（如 `C:\Windows\Fonts\simsun.ttc` / `STSONG.TTF`），再回退到仿宋和其他 CJK 字体。 如需强制指定，可设置 `PDF_FONT_FILE` 或 `WASABI_PDF_FONT` 指向字体文件。
-<<<<<<< ours
-<<<<<<< ours
-=======
-- Windows / Conda 环境中会优先尝试 `python`，再尝试 `py -3` 和 `python3`；如需指定解释器，可设置 `PYTHON` 或 `PYTHON_BIN`。
->>>>>>> theirs
-=======
-- Windows / Conda 环境中会优先尝试 `python`，再尝试 `py -3` 和 `python3`；如需指定解释器，可设置 `PYTHON` 或 `PYTHON_BIN`。
->>>>>>> theirs
 
-安装依赖：
+PDF 模式额外要求：
+
+- 可用的 Python 环境
+- 建议使用 `conda` 的 `docling` 环境
+- Python 依赖安装自 [src/pdf/requirements.txt](/f:/wasabi/wasabi_fork/wasabi_epub/src/pdf/requirements.txt:1)
+
+视频 / 字幕轨模式额外要求：
+
+- `ffmpeg`
+- `ffprobe`
+- 这两个命令需要在 `PATH` 中可用
+
+PDF 中文回填额外建议：
+
+- 系统中需要可用的 CJK 字体
+- 如需手动指定字体，可设置 `PDF_FONT_FILE` 或 `WASABI_PDF_FONT`
+
+## 安装
+
+先安装 Node 依赖：
 
 ```bash
 npm install
+```
+
+如果你要处理 PDF，再安装 PDF 的 Python 依赖：
+
+```bash
+npm run pdf:install
+```
+
+上面这个脚本实际执行的是：
+
+```bash
+conda run -n docling python -m pip install -r src/pdf/requirements.txt
 ```
 
 ## 配置
 
 在项目根目录创建 `.env`。
 
-示例：
+最小示例：
 
 ```env
-# 主 provider / model
 PRIMARY_PROVIDER=qwen
 PRIMARY_MODEL=qwen-plus
 
-# 内容策略命中时的 fallback
 FALLBACK_ON_CONTENT_POLICY=true
 FALLBACK_PROVIDER=openrouter
 FALLBACK_MODEL=x-ai/grok-4.1-fast
 
-# 俄语 glossary 专用 provider / model
-RUSSIAN_GLOSSARY_PROVIDER=openrouter
-RUSSIAN_GLOSSARY_MODEL=mistralai/mistral-small-3.1-24b-instruct
-
-# 日语 glossary 专用 provider / model
-JAPANESE_GLOSSARY_PROVIDER=openrouter
-JAPANESE_GLOSSARY_MODEL=anthropic/claude-sonnet-4.5
-
-# API keys
-GEMINI_API_KEY=your_gemini_api_key
 QWEN_API_KEY=your_qwen_api_key
-MIMO_API_KEY=your_mimo_api_key
 OPENROUTER_API_KEY=your_openrouter_api_key
+```
 
-# 可选：覆盖 provider 默认模型
-# OPENROUTER_MODEL=google/gemini-2.5-pro
+如果你使用别的 provider，也可以配置：
 
-# 可选：自定义 base URL
+```env
+GEMINI_API_KEY=your_gemini_api_key
+MIMO_API_KEY=your_mimo_api_key
+
+# 可选：覆盖默认 base URL
 # QWEN_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
 # MIMO_BASE_URL=https://api.xiaomimimo.com/v1
 # OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
@@ -158,222 +98,182 @@ OPENROUTER_API_KEY=your_openrouter_api_key
 # OPENROUTER_REASONING_ENABLED=true
 ```
 
-说明：
+默认行为：
 
-- `PRIMARY_PROVIDER` 默认是 `qwen`
-- `FALLBACK_PROVIDER` 默认是 `openrouter`
-- 默认源语言是 `English`
-- 默认目标语言是 `Chinese (Simplified)`
-- `--concurrency` 会覆盖所有 provider 的运行时并发设置
-- 如果 glossary 专用 provider 没有可用 API key，会自动回退到主 provider，不会中断任务
+- 默认源语言：`English`
+- 默认目标语言：`Chinese (Simplified)`
+- 默认主 provider：`qwen`
+- 默认 fallback provider：`openrouter`
 
-如需调整翻译风格，可编辑：
-
-- `src/config.js` 中的 `buildStyleGuide()`
-- `prompts/epub_translation_prompt.txt`
-- `prompts/html_translation_prompt.txt`
-
-## CLI 用法
+## 用法
 
 基本格式：
 
 ```bash
-node index.js "your-book.epub|your-file.html|your-file.pdf" [--chap "<selector>"] [--page "<selector>"] [--from "<lang>"] [--to "<lang>"] [--concurrency <n>] [--debug]
+node index.js "input-file" [--chap "<selector>"] [--page "<selector>"] [--from "<lang>"] [--to "<lang>"] [--concurrency <n>] [--debug]
 ```
 
-示例：
+常见示例：
 
 ```bash
 node index.js "book.epub"
-node index.js "book.epub" --debug
 node index.js "book.epub" --to "fr"
-node index.js "book.epub" --from "es" --to "zh"
-node index.js "book.epub" --from "ja" --to "zh"
-node index.js "book.epub" --from "ko" --to "zh"
-node index.js "book.epub" --concurrency 5
-node index.js "book.epub" --chap "1,3,5"
 node index.js "book.epub" --chap "1-3"
-node index.js "book.epub" --chap "'Blackhole'-'Gravity'"
+
 node index.js "chapter.html" --to "zh"
-node index.js "chapter.htm" --from "en" --to "fr"
+
 node index.js "paper.pdf" --to "zh"
 node index.js "paper.pdf" --page "1,3,5" --to "zh"
-node index.js "paper.pdf" --page "2-4" --to "zh"
+
+node index.js "episode.srt" --to "zh"
+node index.js "movie.mkv" --from "en" --to "zh"
+
+node index.js "book.epub" --debug
 ```
 
 参数说明：
 
-- `--chap`：只翻译指定章节，仅 EPUB 支持
-- `--page`：只翻译指定页码，仅 PDF 支持
+- `--chap`：只翻译指定章节，仅 `EPUB`
+- `--page`：只翻译指定页码，仅 `PDF`
 - `--from`：设置源语言
 - `--to`：设置目标语言
-- `--concurrency`：设置本次运行并发数，必须为正整数
+- `--concurrency`：设置并发数，必须为正整数
 - `--debug`：保留缓存目录和日志文件，便于排错
 
-支持的常用语言别名：
+## 选择器语法
 
-- 源语言：`en` `es` `fr` `ru` `zh` `ja` `jp` `ko`
-- 目标语言：`en` `es` `fr` `ru` `zh` `ja` `jp` `ko`
+章节选择 `--chap`：
 
-内部会解析为：
+- `1`
+- `1-3`
+- `1,3,5`
+- `1,1-3`
+- `'Blackhole'-'Gravity'`
 
-- `English`
-- `Spanish`
-- `French`
-- `Russian`
-- `Chinese (Simplified)`
-- `Japanese`
-- `Korean`
+页码选择 `--page`：
 
-### 章节选择语法
+- `1`
+- `2-4`
+- `1,3,5`
+- `1,3-5`
 
-`--chap` 支持：
+## 语言别名
 
-- `1`：单章
-- `1-3`：闭区间范围
-- `1,3,5`：离散章节
-- `1,1-3`：混合选择
-- `'Blackhole'-'Gravity'`：按章节标题精确匹配起止范围
+支持的常用别名：
 
-### 页码选择语法
+- `en` / `english`
+- `es` / `spanish`
+- `fr` / `french`
+- `ru` / `russian`
+- `zh` / `zh-cn` / `zh-hans`
+- `ja` / `jp` / `japanese`
+- `ko` / `korean`
 
-`--page` 支持：
+## 各模式说明
 
-- `1`：单页
-- `2-4`：闭区间范围
-- `1,3,5`：离散页码
-- `1,3-5`：混合选择
+### EPUB
+
+- 输出为新的 `.epub`
+- 会尽量保留目录、章节顺序和原始结构
+- 支持 `--chap`
+
+### HTML
+
+- 输出为新的 `.html`
+- 适合单文件网页或导出的 HTML 文档
+
+### PDF
+
+- 输出为新的 `.pdf`
+- 使用 Node 做主流程编排，Python 负责提取和回填
+- 支持 `--page`
+- 会尽量保留图片、矢量图、页眉页脚等非正文区域
+- Python 环境优先尝试 `conda run -n docling python`
+
+### SRT
+
+- 输出为新的 `.srt`
+- 会先解析字幕 cue，再走统一翻译流程
+
+### 视频字幕
+
+- 输出统一为新的 `.mkv`
+- 会优先探测内嵌字幕轨，也会识别同目录下的外部字幕文件
+- 如果没有显式传 `--from`，会优先用字幕轨语言或字幕文本推断源语言
+- 当前只支持文本类字幕轨，不支持图片字幕轨
 
 ## 输入、输出与缓存
 
 输入文件可以放在：
 
 - 项目根目录
-- `input/` 目录
+- `input/`
 
 运行成功后：
 
-- 输入文件会被移动到 `input/`
-- 输出文件会写入 `output/`
+- 最终结果写入 `output/`
+- 原输入文件会被移动到 `input/`
 
-输出命名规则：
+非 `--debug` 模式：
+
+- 中间缓存会自动清理
+- 日志文件会自动清理
+
+`--debug` 模式：
+
+- 会保留 `.cache_*` 目录
+- 会保留 `log/` 下的日志文件
+
+典型输出文件名：
+
+- `book_zh.epub`
+- `chapter_zh.html`
+- `paper_zh.pdf`
+- `episode_zh.srt`
+- `movie_zh.mkv`
+
+## 常见问题
+
+### 1. PDF 跑不起来
+
+优先检查：
+
+- `conda` 是否可用
+- `docling` 环境是否存在
+- 是否执行过 `npm run pdf:install`
+
+如果你的 Python 不在默认位置，也可以设置：
+
+- `DOCLING_CONDA_PREFIX`
+- `PYTHON`
+- `PYTHON_BIN`
+
+### 2. 视频字幕模式报错
+
+优先检查：
+
+- `ffmpeg` 和 `ffprobe` 是否已安装
+- 是否在命令行里直接执行这两个命令
+- 输入视频里是否有可用的文本字幕轨，或同目录是否有外部字幕文件
+
+### 3. 想保留日志和中间文件方便排错
+
+加上：
+
+```bash
+--debug
+```
+
+## 项目结构
+
+用户通常只需要关心这些目录：
 
 ```text
-book_zh.epub
-book_fr.epub
-chapter_zh.html
-paper_zh.pdf
-paper_zh.html
+input/    放输入文件
+output/   放最终输出
+log/      调试日志
+src/      程序源码
+src/pdf/  PDF 子模块
 ```
 
-如果使用 `--chap`，输出文件会带章节选择后缀，例如：
-
-```text
-book_chap-1-3_zh.epub
-```
-
-如果使用 `--page`，PDF 输出和缓存会带页码选择后缀，例如：
-
-```text
-paper_page-2-4_zh.pdf
-paper_page-2-4_zh.html
-```
-
-缓存目录规则：
-
-- 整本 EPUB：`.cache_<文件名>/`
-- 指定章节 EPUB：`.cache_<文件名>_chap-<selector>/`
-- 单 HTML：`.cache_<文件名>_html/`
-- PDF：`.cache_<文件名>_pdf/`；如果用了 `--page`，则为 `.cache_<文件名>_page-<selector>_pdf/`，其中包含提取和回填用的 JSON 中间文件
-
-默认情况下任务结束后会清理缓存和日志。加上 `--debug` 后会保留：
-
-- 缓存目录
-- `log/` 下的运行日志
-
-## 翻译流程
-
-### EPUB 模式
-
-```text
-Step 1  章节规划        AI 分析章节列表，识别 TOC，生成翻译顺序
-Step 2  标题分析        收集标题样本，生成标题格式规则
-Step 3  术语表生成      提取高频词组并由 AI 筛选
-Step 4  正文翻译        提取节点 -> 分类过滤 -> 分批翻译 -> 失败重试 -> 写入缓存
-Step 5  标题标准化      应用标题格式规则
-Step 6  TOC 同步        更新 HTML TOC 链接文字
-Step 7  NCX 同步        更新 EPUB 导航元数据
-Step 8  保存输出        写回 EPUB 并输出到 output/
-```
-
-### HTML 模式
-
-```text
-Step 1  标题分析        收集标题样本，生成格式规则
-Step 2  术语表生成      提取术语并由 AI 筛选
-Step 3  正文翻译        提取节点 -> 分类过滤 -> 分批翻译 -> 写入缓存
-Step 4  标题标准化      应用标题规则
-Step 5  保存输出        写出到 output/
-```
-
-## 提取阶段内容过滤
-
-节点在进入翻译前会先经过 `src/content/content-classifier.js`。
-
-当前处理策略：
-
-- 保留正常文本节点
-- 丢弃明显 OCR 噪声，例如极短碎片、替换字符 `�`、主要由符号构成的无意义片段、脱离上下文的数字碎片
-- 识别明显 caption 标签样文本
-- 对明显伪表格插入简单占位符，而不是送去翻译
-- 对公式样内容保留占位思路，避免污染翻译上下文
-
-伪表格检测是保守策略，只针对明显的 OCR / ASCII / 像素网格类表格，尽量不误伤真实数据表。
-
-被过滤节点会记录简要日志，格式包含：
-
-```json
-{
-  "id": "node_12",
-  "type": "TABLE_PSEUDO",
-  "action": "PLACEHOLDER",
-  "reason": "image_like_table",
-  "preview": "0 # 0 o ..."
-}
-```
-
-## 术语表与语言处理
-
-术语提取会根据源语言采用不同分词方案：
-
-- 英语 / 西语 / 法语：基于 `natural`
-- 中文：`jieba-wasm`
-- 日语：`kuromoji`
-- 韩语：`oktjs`
-- 俄语：西里尔字母规则 + N-gram
-
-俄语和日语支持单独的 glossary provider / model 配置，用于术语筛选质量优化。
-
-## 日志
-
-每次运行会在 `log/` 下创建独立日志文件，格式类似：
-
-```text
-translation_YYYY-MM-DDTHH-MM-SS.log
-```
-
-日志会记录：
-
-- AI 请求与响应
-- 批处理失败、重试、回退信息
-- 术语表和标题规则生成信息
-- 内容过滤跳过记录
-- 主流程错误信息
-
-## 注意事项
-
-- 翻译质量高度依赖所选模型
-- 长书翻译成本较高，建议先用 `--chap` 小范围试跑
-- TOC 同步依赖章节内存在可识别标题
-- `--chap` 只支持 EPUB，不支持 HTML
-- 如果需要强制重跑，删除对应 `.cache_*` 目录后重新执行
+如果你只想使用，不需要理解内部实现；如果你要继续改 PDF 流程，可以从 [src/pdf/README.md](/f:/wasabi/wasabi_fork/wasabi_epub/src/pdf/README.md:1) 开始看。
