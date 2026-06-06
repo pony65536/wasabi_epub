@@ -307,4 +307,4 @@ src/      Program source code
 src/pdf/  PDF sub-module
 ```
 
-If you only want to use the tool, you don't need to understand the internals. If you want to modify the PDF pipeline, start with [src/pdf/README.md](/f:/wasabi/wasabi_fork/wasabi_epub/src/pdf/README.md:1).
+If you only want to use the tool, you don't need to understand the internals. If you want to modify the PDF pipeline, start with [src/pdf/README.md](./src/pdf/README.md).
