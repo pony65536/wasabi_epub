@@ -32,8 +32,8 @@
 PDF 模式额外要求：
 
 - 可用的 Python 环境
-- 建议使用 `conda` 的 `docling` 环境
 - Python 依赖安装自 [src/pdf/requirements.txt](/f:/wasabi/wasabi_fork/wasabi_epub/src/pdf/requirements.txt:1)
+- 如需固定使用某个 Python，可在 `.env` 中设置 `WASABI_PDF_PYTHON`
 
 视频 / 字幕轨模式额外要求：
 
@@ -57,13 +57,13 @@ npm install
 如果你要处理 PDF，再安装 PDF 的 Python 依赖：
 
 ```bash
-npm run pdf:install
+python -m pip install -r src/pdf/requirements.txt
 ```
 
-上面这个脚本实际执行的是：
+或者：
 
 ```bash
-conda run -n docling python -m pip install -r src/pdf/requirements.txt
+npm run pdf:install
 ```
 
 ## 配置
@@ -105,6 +105,13 @@ MIMO_API_KEY=your_mimo_api_key
 - 默认目标语言：`Chinese (Simplified)`
 - 默认主 provider：`qwen`
 - 默认 fallback provider：`openrouter`
+
+PDF 模式可选配置：
+
+```env
+# Optional: explicitly choose the Python executable for PDF mode
+WASABI_PDF_PYTHON=C:\path\to\python.exe
+```
 
 ## 用法
 
@@ -189,7 +196,7 @@ node index.js "book.epub" --debug
 - 使用 Node 做主流程编排，Python 负责提取和回填
 - 支持 `--page`
 - 会尽量保留图片、矢量图、页眉页脚等非正文区域
-- Python 环境优先尝试 `conda run -n docling python`
+- Python 环境优先使用 `WASABI_PDF_PYTHON`，否则回退到系统 `python`
 
 ### SRT
 
@@ -239,13 +246,13 @@ node index.js "book.epub" --debug
 
 优先检查：
 
-- `conda` 是否可用
-- `docling` 环境是否存在
-- 是否执行过 `npm run pdf:install`
+- 是否执行过 `python -m pip install -r src/pdf/requirements.txt`
+- `python` 命令是否可用
+- 如果你在用自定义环境，是否设置了 `WASABI_PDF_PYTHON`
 
 如果你的 Python 不在默认位置，也可以设置：
 
-- `DOCLING_CONDA_PREFIX`
+- `WASABI_PDF_PYTHON`
 - `PYTHON`
 - `PYTHON_BIN`
 

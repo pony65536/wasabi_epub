@@ -32,8 +32,8 @@ Base requirements:
 Additional requirements for PDF mode:
 
 - A working Python environment
-- The `docling` conda environment is recommended
 - Python dependencies listed in [src/pdf/requirements.txt](/f:/wasabi/wasabi_fork/wasabi_epub/src/pdf/requirements.txt:1)
+- If needed, pin a specific Python via `WASABI_PDF_PYTHON`
 
 Additional requirements for video / subtitle track mode:
 
@@ -57,13 +57,13 @@ npm install
 If you need to process PDFs, also install the PDF Python dependencies:
 
 ```bash
-npm run pdf:install
+python -m pip install -r src/pdf/requirements.txt
 ```
 
-The above script runs:
+Or:
 
 ```bash
-conda run -n docling python -m pip install -r src/pdf/requirements.txt
+npm run pdf:install
 ```
 
 ## Configuration
@@ -105,6 +105,13 @@ Default behavior:
 - Default target language: `Chinese (Simplified)`
 - Default primary provider: `qwen`
 - Default fallback provider: `openrouter`
+
+Optional PDF setting:
+
+```env
+# Optional: explicitly choose the Python executable for PDF mode
+WASABI_PDF_PYTHON=C:\path\to\python.exe
+```
 
 ## Usage
 
@@ -189,7 +196,7 @@ Supported common aliases:
 - Node handles the main orchestration; Python handles extraction and back-fill
 - Supports `--page`
 - Preserves images, vector graphics, headers, footers, and other non-body regions as much as possible
-- Python environment defaults to `conda run -n docling python`
+- Uses `WASABI_PDF_PYTHON` first if set, otherwise falls back to system `python`
 
 ### SRT
 
@@ -239,13 +246,13 @@ Typical output filenames:
 
 Check:
 
-- Is `conda` available?
-- Does the `docling` environment exist?
-- Have you run `npm run pdf:install`?
+- Have you run `python -m pip install -r src/pdf/requirements.txt`?
+- Is `python` available on your system?
+- If you use a custom environment, did you set `WASABI_PDF_PYTHON`?
 
 If your Python is not in the default location, you can also set:
 
-- `DOCLING_CONDA_PREFIX`
+- `WASABI_PDF_PYTHON`
 - `PYTHON`
 - `PYTHON_BIN`
 

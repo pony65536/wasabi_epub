@@ -1,4 +1,4 @@
-import { execFileSync, spawn } from "child_process";
+import { spawn } from "child_process";
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
@@ -7,59 +7,15 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const SCRIPT_PATH = path.resolve(__dirname, "translate_pdf.py");
 
-const getCondaCommand = () =>
-    process.env.CONDA_EXE || process.env._CONDA_EXE || "conda";
-
-const getConfiguredDoclingPrefix = () =>
-    process.env.DOCLING_CONDA_PREFIX || process.env.WASABI_CONDA_PREFIX || null;
-
-const discoverDoclingCondaPrefix = () => {
-    const configuredPrefix = getConfiguredDoclingPrefix();
-    if (configuredPrefix) return configuredPrefix;
-
-    try {
-        const raw = execFileSync(
-            getCondaCommand(),
-            ["env", "list", "--json"],
-            {
-                encoding: "utf8",
-                stdio: ["ignore", "pipe", "ignore"],
-                windowsHide: true,
-            },
-        );
-        const payload = JSON.parse(raw);
-        const envs = Array.isArray(payload?.envs) ? payload.envs : [];
-        return (
-            envs.find((envPath) =>
-                /[\\/]envs[\\/]+docling$/i.test(String(envPath || "")),
-            ) || null
-        );
-    } catch {
-        return null;
-    }
-};
-
 const getPythonCandidates = () => {
-    const configuredPython = process.env.PYTHON || process.env.PYTHON_BIN;
+    const configuredPython =
+        process.env.WASABI_PDF_PYTHON ||
+        process.env.PYTHON ||
+        process.env.PYTHON_BIN;
     if (configuredPython) return [{ command: configuredPython, args: [] }];
-
-    const condaCommand = getCondaCommand();
-    const doclingPrefix = discoverDoclingCondaPrefix();
-    const condaCandidates = [];
-    if (doclingPrefix) {
-        condaCandidates.push({
-            command: condaCommand,
-            args: ["run", "--no-capture-output", "-p", doclingPrefix, "python"],
-        });
-    }
-    condaCandidates.push({
-        command: condaCommand,
-        args: ["run", "--no-capture-output", "-n", "docling", "python"],
-    });
 
     if (process.platform === "win32") {
         return [
-            ...condaCandidates,
             { command: "python", args: [] },
             { command: "py", args: ["-3"] },
             { command: "python3", args: [] },
@@ -67,9 +23,8 @@ const getPythonCandidates = () => {
     }
 
     return [
-        ...condaCandidates,
-        { command: "python3", args: [] },
         { command: "python", args: [] },
+        { command: "python3", args: [] },
     ];
 };
 
@@ -82,7 +37,7 @@ const createPythonNotFoundError = (attempts) =>
     new Error(
         `Unable to start the PDF Python helper. Tried: ${attempts
             .map((attempt) => formatPythonCommand(attempt.candidate))
-            .join(", ")}. Ensure the Conda env 'docling' is available, or set DOCLING_CONDA_PREFIX / PYTHON / PYTHON_BIN explicitly.`,
+            .join(", ")}. Install the dependencies from src/pdf/requirements.txt, or set WASABI_PDF_PYTHON / PYTHON / PYTHON_BIN explicitly.`,
     );
 
 const runPythonWithCandidate = (

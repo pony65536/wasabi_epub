@@ -55,7 +55,7 @@ src/pdf/
 安装 PDF Python 依赖：
 
 ```powershell
-conda run -n docling python -m pip install -r src/pdf/requirements.txt
+python -m pip install -r src/pdf/requirements.txt
 ```
 
 或在项目根目录直接执行：
@@ -81,7 +81,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\run-pdf-regression.ps1
 如果这次改动涉及提取、保留规则或渲染逻辑，除了轻量回归，还建议手动跑一份样本 PDF：
 
 ```powershell
-conda run -p <docling-prefix> python src/pdf/translate_pdf.py extract input/1706.03762v7.pdf output/pdf_blocks_smoke.json --pages 1
+python src/pdf/translate_pdf.py extract input/1706.03762v7.pdf output/pdf_blocks_smoke.json --pages 1
 ```
 
 建议至少检查：

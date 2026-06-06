@@ -2,7 +2,7 @@
     "main": "bot.js",
     "type": "module",
     "scripts": {
-        "pdf:install": "conda run -n docling python -m pip install -r src/pdf/requirements.txt"
+        "pdf:install": "python -m pip install -r src/pdf/requirements.txt"
     },
     "dependencies": {
         "@google/generative-ai": "^0.24.1",
