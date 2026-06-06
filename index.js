@@ -10,6 +10,7 @@ import {
 import {
     runHtmlTranslationJob,
     runPdfTranslationJob,
+    runSubtitleTranslationJob,
     runTranslationJob,
 } from "./src/core.js";
 import { parsePageSelector } from "./src/support/pageSelection.js";
@@ -24,7 +25,7 @@ const printUsageAndExit = (message) => {
     }
 
     console.error(
-        'Usage: node index.js "your-book.epub|your-file.html|your-file.pdf" [--chap "<selector>"] [--page "<selector>"] [--from "<lang>"] [--to "<lang>"] [--concurrency <n>] [--debug]',
+        'Usage: node index.js "your-book.epub|your-file.html|your-file.pdf|your-file.srt|your-video.mkv|your-video.mp4" [--chap "<selector>"] [--page "<selector>"] [--from "<lang>"] [--to "<lang>"] [--concurrency <n>] [--debug]',
     );
     console.error("");
     console.error("Examples:");
@@ -41,6 +42,8 @@ const printUsageAndExit = (message) => {
     console.error('  node index.js "chapter.html" --to "zh"');
     console.error('  node index.js "paper.pdf" --to "zh"');
     console.error('  node index.js "paper.pdf" --page "1,3,5" --to "zh"');
+    console.error('  node index.js "episode.srt" --to "zh"');
+    console.error('  node index.js "episode.mkv" --from "en" --to "zh"');
     process.exit(1);
 };
 
@@ -104,6 +107,7 @@ const parseCliArgs = (argv) => {
         pageSelector: null,
         sourceLanguage: DEFAULT_SOURCE_LANGUAGE,
         targetLanguage: DEFAULT_TARGET_LANGUAGE,
+        sourceLanguageExplicit: false,
         concurrency: null,
         debug: false,
     };
@@ -153,6 +157,7 @@ const parseCliArgs = (argv) => {
                 printUsageAndExit("Missing value after --from.");
             }
             result.sourceLanguage = resolveSourceLanguage(nextValue);
+            result.sourceLanguageExplicit = true;
             i++;
             continue;
         }
@@ -163,6 +168,7 @@ const parseCliArgs = (argv) => {
                 printUsageAndExit("Missing value after --from=.");
             }
             result.sourceLanguage = resolveSourceLanguage(value);
+            result.sourceLanguageExplicit = true;
             continue;
         }
 
@@ -250,9 +256,11 @@ const resolveInputPath = (inputFileName) => {
     }
 
     const ext = path.extname(inputPath).toLowerCase();
-    if (![".epub", ".html", ".htm", ".pdf"].includes(ext)) {
+    if (
+        ![".epub", ".html", ".htm", ".pdf", ".srt", ".mkv", ".mp4", ".mov", ".m4v", ".webm"].includes(ext)
+    ) {
         printUsageAndExit(
-            `Input file must be an EPUB, HTML, or PDF document: ${inputFileName}`,
+            `Input file must be an EPUB, HTML, PDF, SRT, or supported video file: ${inputFileName}`,
         );
     }
 
@@ -304,7 +312,7 @@ const main = async () => {
                 debugMode: cliArgs.debug,
                 runtimeConfig,
             });
-        } else {
+        } else if (inputExt === ".html" || inputExt === ".htm") {
             if (cliArgs.chapterSelector) {
                 printUsageAndExit("--chap is only supported for EPUB input.");
             }
@@ -317,6 +325,21 @@ const main = async () => {
                 inputPath,
                 debugMode: cliArgs.debug,
                 runtimeConfig,
+            });
+        } else {
+            if (cliArgs.chapterSelector) {
+                printUsageAndExit("--chap is only supported for EPUB input.");
+            }
+            if (cliArgs.pageSelector) {
+                printUsageAndExit("--page is only supported for PDF input.");
+            }
+
+            await runSubtitleTranslationJob({
+                projectRoot: __dirname,
+                inputPath,
+                debugMode: cliArgs.debug,
+                runtimeConfig,
+                sourceLanguageExplicit: cliArgs.sourceLanguageExplicit,
             });
         }
     } catch (error) {
