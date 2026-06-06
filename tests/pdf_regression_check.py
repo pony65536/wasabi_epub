@@ -258,6 +258,26 @@ class StructureTests(unittest.TestCase):
             "pdf",
         )
 
+    def test_preserved_xobject_names_by_page_collects_anchor_names(self) -> None:
+        pages_blocks = [[
+            {
+                "preserveAnchors": {
+                    "xobjects": [
+                        {"name": "/X1", "subtype": "/Form"},
+                        {"name": "/X4", "subtype": "/Image"},
+                    ]
+                }
+            },
+            {
+                "preserveAnchors": {
+                    "xobjects": [
+                        {"name": "/X1", "subtype": "/Form"},
+                    ]
+                }
+            },
+        ]]
+        self.assertEqual(pdf_fill_impl._preserved_xobject_names_by_page(pages_blocks), [{"/X1", "/X4"}])
+
 
 if __name__ == "__main__":
     unittest.main()

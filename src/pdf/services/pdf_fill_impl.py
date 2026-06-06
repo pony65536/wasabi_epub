@@ -74,6 +74,44 @@ def _preserved_text_signatures_by_page(
     return signatures_by_page
 
 
+def _preserved_xobject_names_by_page(
+    pages_blocks: List[List[Dict[str, Any]]],
+) -> List[set[str]]:
+    names_by_page: List[set[str]] = []
+    for page_blocks in pages_blocks:
+        names: set[str] = set()
+        for block in page_blocks:
+            anchors = block.get("preserveAnchors") or {}
+            for anchor in anchors.get("xobjects", []) or []:
+                name = str(anchor.get("name") or "").strip()
+                if name:
+                    names.add(name)
+        names_by_page.append(names)
+    return names_by_page
+
+
+def _preserved_text_object_refs_by_page(
+    pages_blocks: List[List[Dict[str, Any]]],
+) -> List[Dict[tuple[int, int], set[int]]]:
+    refs_by_page: List[Dict[tuple[int, int], set[int]]] = []
+    for page_blocks in pages_blocks:
+        page_refs: Dict[tuple[int, int], set[int]] = {}
+        for block in page_blocks:
+            anchors = block.get("preserveAnchors") or {}
+            for anchor in anchors.get("textObjects", []) or []:
+                stream_objgen = anchor.get("streamObjgen") or []
+                if not isinstance(stream_objgen, (list, tuple)) or len(stream_objgen) != 2:
+                    continue
+                try:
+                    stream_key = (int(stream_objgen[0]), int(stream_objgen[1]))
+                    text_object_index = int(anchor.get("textObjectIndex"))
+                except Exception:
+                    continue
+                page_refs.setdefault(stream_key, set()).add(text_object_index)
+        refs_by_page.append(page_refs)
+    return refs_by_page
+
+
 def _fallback_output_path(output_pdf: str) -> str:
     target = Path(output_pdf)
     timestamp = time.strftime("%Y%m%d_%H%M%S")
@@ -463,6 +501,12 @@ def fill_pdf_preserving_graphics(
         preserved_text_signatures_by_page = _preserved_text_signatures_by_page(
             pages_blocks
         )
+        preserved_text_object_refs_by_page = _preserved_text_object_refs_by_page(
+            pages_blocks
+        )
+        preserved_xobject_names_by_page = _preserved_xobject_names_by_page(
+            pages_blocks
+        )
         strip_stats = strip_text_from_pdf(
             input_pdf,
             str(stripped_pdf_path),
@@ -470,6 +514,8 @@ def fill_pdf_preserving_graphics(
             preserve_unterminated_text=False,
             preserve_text_regions_by_page=preserved_text_regions_by_page,
             preserve_text_signatures_by_page=preserved_text_signatures_by_page,
+            preserve_text_object_refs_by_page=preserved_text_object_refs_by_page,
+            preserve_xobject_names_by_page=preserved_xobject_names_by_page,
         )
         print(
             f"PDF fill: strip_text_from_pdf done pages={strip_stats.pages} "
@@ -484,12 +530,6 @@ def fill_pdf_preserving_graphics(
             total_pages = len(doc)
             for page_index, page in enumerate(doc):
                 page_started = time.perf_counter()
-                overlay_doc = fitz.open()
-                overlay_page = overlay_doc.new_page(
-                    width=float(page.rect.width),
-                    height=float(page.rect.height),
-                )
-                overlay_has_content = False
                 print(
                     f"PDF fill: page {page_index + 1}/{total_pages} start",
                     flush=True,
@@ -545,6 +585,14 @@ def fill_pdf_preserving_graphics(
                             flush=True,
                         )
                         continue
+                    if str(block.get("preserveStrategy") or "") == "pdf_object":
+                        preserved += 1
+                        print(
+                            f"PDF fill: page {page_index + 1}/{total_pages} block {block.get('id')} deferred "
+                            f"to object-preserved source text",
+                            flush=True,
+                        )
+                        continue
                     if block.get("preserveReason") == "translation_meta_note":
                         note_preview = common.normalize_text(block.get("translationMetaNote") or "")[:120]
                         print(
@@ -552,13 +600,12 @@ def fill_pdf_preserving_graphics(
                             f"due to translator meta note: {note_preview!r}",
                             flush=True,
                         )
-                    target_page = page if block.get("preserveOriginal") else overlay_page
                     preserve_mode = _preserve_mode_for_block(
                         block,
                         preserved_decorative_picture_regions_by_page,
                     )
                     result = rendering.write_translated_block(
-                        target_page,
+                        page,
                         block,
                         fitz,
                         source_doc=source_doc,
@@ -573,8 +620,6 @@ def fill_pdf_preserving_graphics(
                         )
                         continue
                     if result:
-                        if not block.get("preserveOriginal"):
-                            overlay_has_content = True
                         if block.get("preserveOriginal"):
                             preserved += 1
                         else:
@@ -597,15 +642,6 @@ def fill_pdf_preserving_graphics(
                             f"bbox={block.get('bbox')} text={preview!r}",
                             flush=True,
                         )
-                if overlay_has_content:
-                    try:
-                        page.show_pdf_page(page.rect, overlay_doc, 0, overlay=True)
-                    except Exception:
-                        failed += 1
-                        print(
-                            f"WARN: overlay merge failed on page {page_index + 1}",
-                            flush=True,
-                        )
                 if page_index == 0:
                     _write_brand_logo(page, source_doc[page_index], fitz)
                 print(
@@ -614,7 +650,6 @@ def fill_pdf_preserving_graphics(
                     f"elapsed={time.perf_counter() - page_started:.2f}s",
                     flush=True,
                 )
-                overlay_doc.close()
 
             subset_started = time.perf_counter()
             print("PDF fill: subset_fonts start", flush=True)

@@ -269,6 +269,7 @@ def filter_text_instructions(
     preserve_unterminated_text: bool = True,
     preserve_text_regions: Optional[List[List[float]]] = None,
     preserve_text_signatures: Optional[Set[str]] = None,
+    preserve_text_object_indexes: Optional[Set[int]] = None,
     preserve_all_text: bool = False,
 ) -> tuple[List[Any], StripTextStats]:
     filtered: List[Any] = []
@@ -278,6 +279,7 @@ def filter_text_instructions(
     current_ctm = identity_matrix()
     ctm_stack: List[Tuple[float, float, float, float, float, float]] = []
     text_object_ctm = identity_matrix()
+    text_object_index = 0
 
     for instruction in instructions:
         operator = str(instruction.operator)
@@ -303,6 +305,7 @@ def filter_text_instructions(
                     stats.retained_unterminated_text_objects += 1
                 else:
                     stats.removed_text_objects += 1
+                text_object_index += 1
             in_text_object = True
             text_object = [instruction]
             text_object_ctm = current_ctm
@@ -321,6 +324,9 @@ def filter_text_instructions(
         if preserve_all_text:
             filtered.extend(text_object)
             stats.retained_form_text_objects += 1
+        elif preserve_text_object_indexes and text_object_index in preserve_text_object_indexes:
+            filtered.extend(text_object)
+            stats.retained_preserved_region_text_objects += 1
         elif preserve_text_signatures and text_signature and text_signature in preserve_text_signatures:
             filtered.extend(text_object)
             stats.retained_preserved_region_text_objects += 1
@@ -363,6 +369,7 @@ def filter_text_instructions(
             stats.removed_text_objects += 1
         in_text_object = False
         text_object = []
+        text_object_index += 1
 
     if in_text_object and text_object:
         if not preserve_risky_text and not preserve_unterminated_text:
@@ -372,6 +379,7 @@ def filter_text_instructions(
             stats.retained_unterminated_text_objects += 1
         else:
             stats.removed_text_objects += 1
+        text_object_index += 1
 
     return filtered, stats
 
@@ -386,6 +394,8 @@ def strip_stream_text_recursive(
     preserve_unterminated_text: bool = True,
     preserve_text_regions: Optional[List[List[float]]] = None,
     preserve_text_signatures: Optional[Set[str]] = None,
+    preserve_text_object_refs: Optional[Dict[Tuple[int, int], Set[int]]] = None,
+    preserve_xobject_names: Optional[Set[str]] = None,
     preserve_all_text: bool = False,
 ) -> StripTextStats:
     stream_key = pdf_object_visit_key(stream_obj)
@@ -400,7 +410,7 @@ def strip_stream_text_recursive(
     except Exception:
         xobjects = None
     if xobjects is not None:
-        for _, xobject in xobjects.items():
+        for xobject_name, xobject in xobjects.items():
             try:
                 subtype = str(xobject.get("/Subtype") or "")
             except Exception:
@@ -408,6 +418,9 @@ def strip_stream_text_recursive(
             if subtype != "/Form":
                 continue
             stats.forms += 1
+            if preserve_xobject_names and str(xobject_name) in preserve_xobject_names:
+                stats.retained_form_text_objects += 1
+                continue
             child_stats = strip_stream_text_recursive(
                 xobject,
                 stream_resources,
@@ -417,6 +430,8 @@ def strip_stream_text_recursive(
                 preserve_unterminated_text=preserve_unterminated_text,
                 preserve_text_regions=preserve_text_regions,
                 preserve_text_signatures=preserve_text_signatures,
+                preserve_text_object_refs=preserve_text_object_refs,
+                preserve_xobject_names=preserve_xobject_names,
                 preserve_all_text=bool(preserve_text_regions),
             )
             stats.streams += child_stats.streams
@@ -435,6 +450,11 @@ def strip_stream_text_recursive(
         preserve_unterminated_text=preserve_unterminated_text,
         preserve_text_regions=preserve_text_regions,
         preserve_text_signatures=preserve_text_signatures,
+        preserve_text_object_indexes=(
+            preserve_text_object_refs.get(stream_obj.objgen, set())
+            if preserve_text_object_refs and isinstance(getattr(stream_obj, "objgen", None), tuple)
+            else None
+        ),
         preserve_all_text=preserve_all_text,
     )
     stream_obj.write(models.unparse_content_stream(filtered_instructions))
@@ -455,6 +475,8 @@ def strip_text_from_pdf(
     preserve_unterminated_text: bool = True,
     preserve_text_regions_by_page: Optional[List[List[List[float]]]] = None,
     preserve_text_signatures_by_page: Optional[List[Set[str]]] = None,
+    preserve_text_object_refs_by_page: Optional[List[Dict[Tuple[int, int], Set[int]]]] = None,
+    preserve_xobject_names_by_page: Optional[List[Set[str]]] = None,
 ) -> StripTextStats:
     pikepdf, models = common.require_pikepdf()
     pdf = pikepdf.Pdf.open(input_pdf)
@@ -489,6 +511,18 @@ def strip_text_from_pdf(
                     preserve_text_signatures_by_page[page_index - 1]
                     if preserve_text_signatures_by_page is not None
                     and page_index - 1 < len(preserve_text_signatures_by_page)
+                    else None
+                ),
+                preserve_text_object_refs=(
+                    preserve_text_object_refs_by_page[page_index - 1]
+                    if preserve_text_object_refs_by_page is not None
+                    and page_index - 1 < len(preserve_text_object_refs_by_page)
+                    else None
+                ),
+                preserve_xobject_names=(
+                    preserve_xobject_names_by_page[page_index - 1]
+                    if preserve_xobject_names_by_page is not None
+                    and page_index - 1 < len(preserve_xobject_names_by_page)
                     else None
                 ),
             )
