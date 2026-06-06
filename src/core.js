@@ -909,12 +909,6 @@ export const runPdfTranslationJob = async ({
             ? `${fileInfo.name}_page-${selectionSlug}_${targetLanguageSlug}.pdf`
             : `${fileInfo.name}_${targetLanguageSlug}.pdf`,
     );
-    const outputHtmlPath = path.resolve(
-        outputDir,
-        pageSelector
-            ? `${fileInfo.name}_page-${selectionSlug}_${targetLanguageSlug}.html`
-            : `${fileInfo.name}_${targetLanguageSlug}.html`,
-    );
     const cacheDir = path.resolve(
         projectRoot,
         pageSelector
@@ -929,7 +923,15 @@ export const runPdfTranslationJob = async ({
     console.log(`\n========================================`);
     console.log(`📕 Input:  ${path.basename(inputPath)}`);
     console.log(`💾 Output: ${path.basename(outputPdfPath)}`);
-    console.log(`📄 HTML:   ${path.basename(outputHtmlPath)}`);
+    if (debugMode) {
+        const outputHtmlPath = path.resolve(
+            outputDir,
+            pageSelector
+                ? `${fileInfo.name}_page-${selectionSlug}_${targetLanguageSlug}.html`
+                : `${fileInfo.name}_${targetLanguageSlug}.html`,
+        );
+        console.log(`📄 HTML:   ${path.basename(outputHtmlPath)}`);
+    }
     console.log(`📦 Cache:  ${path.basename(cacheDir)}`);
     console.log(`🐞 Debug: ${debugMode ? "on" : "off"}`);
     console.log(`🗣️ Source: ${runtimeConfig.sourceLanguage}`);
@@ -1040,8 +1042,17 @@ export const runPdfTranslationJob = async ({
         }
 
         const translatedHtml = chapterMap.get("document").html;
-        console.log(`\n💾 Step 4: Saving translated HTML snapshot...`);
-        fs.writeFileSync(outputHtmlPath, translatedHtml, "utf8");
+        let outputHtmlPath = null;
+        if (debugMode) {
+            outputHtmlPath = path.resolve(
+                outputDir,
+                pageSelector
+                    ? `${fileInfo.name}_page-${selectionSlug}_${targetLanguageSlug}.html`
+                    : `${fileInfo.name}_${targetLanguageSlug}.html`,
+            );
+            console.log(`\n💾 Step 4: Saving translated HTML snapshot...`);
+            fs.writeFileSync(outputHtmlPath, translatedHtml, "utf8");
+        }
 
         const translatedPdfJson = applyTranslatedHtmlToPdfJson(pdfJson, translatedHtml);
         const repairedRuns = await repairPdfMergedTranslationRuns(
@@ -1058,27 +1069,29 @@ export const runPdfTranslationJob = async ({
             JSON.stringify(translatedPdfJson, null, 2),
             "utf8",
         );
-        fs.writeFileSync(
-            debugSummaryPath,
-            JSON.stringify(
-                (translatedPdfJson.blocks || []).map((block) => ({
-                    id: block.id,
-                    page: block.page,
-                    role: block.role,
-                    preserveOriginal: Boolean(block.preserveOriginal),
-                    preserveReason: block.preserveReason || null,
-                    fontSize: block.fontSize,
-                    bbox: block.bbox,
-                    text: block.text,
-                    translatedText: block.translatedText || null,
-                    translationMetaNote: block.translationMetaNote || null,
-                })),
-                null,
-                2,
-            ),
-            "utf8",
-        );
-        console.log(`🧾 Debug:  ${path.basename(debugSummaryPath)}`);
+        if (debugMode) {
+            fs.writeFileSync(
+                debugSummaryPath,
+                JSON.stringify(
+                    (translatedPdfJson.blocks || []).map((block) => ({
+                        id: block.id,
+                        page: block.page,
+                        role: block.role,
+                        preserveOriginal: Boolean(block.preserveOriginal),
+                        preserveReason: block.preserveReason || null,
+                        fontSize: block.fontSize,
+                        bbox: block.bbox,
+                        text: block.text,
+                        translatedText: block.translatedText || null,
+                        translationMetaNote: block.translationMetaNote || null,
+                    })),
+                    null,
+                    2,
+                ),
+                "utf8",
+            );
+            console.log(`🧾 Debug:  ${path.basename(debugSummaryPath)}`);
+        }
 
         console.log("\n📥 Step 5: Filling translated text back into PDF...");
         await fillPdfFromJson(inputPath, translatedJsonPath, outputPdfPath, logger);

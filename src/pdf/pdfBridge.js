@@ -85,8 +85,14 @@ const createPythonNotFoundError = (attempts) =>
             .join(", ")}. Ensure the Conda env 'docling' is available, or set DOCLING_CONDA_PREFIX / PYTHON / PYTHON_BIN explicitly.`,
     );
 
-const runPythonWithCandidate = (candidate, args, logger) =>
+const runPythonWithCandidate = (
+    candidate,
+    args,
+    logger,
+    options = {},
+) =>
     new Promise((resolve, reject) => {
+        const streamOutputToTerminal = options.streamOutputToTerminal !== false;
         const child = spawn(
             candidate.command,
             [...candidate.args, SCRIPT_PATH, ...args],
@@ -107,12 +113,16 @@ const runPythonWithCandidate = (candidate, args, logger) =>
         child.stdout.on("data", (chunk) => {
             const text = chunk.toString();
             stdout += text;
-            streamOutput(text, process.stdout);
+            if (streamOutputToTerminal) {
+                streamOutput(text, process.stdout);
+            }
         });
         child.stderr.on("data", (chunk) => {
             const text = chunk.toString();
             stderr += text;
-            streamOutput(text, process.stderr);
+            if (streamOutputToTerminal) {
+                streamOutput(text, process.stderr);
+            }
         });
         child.on("error", (error) => {
             reject({ type: "spawn", candidate, error, stdout, stderr });
@@ -138,12 +148,12 @@ const isCommandNotFound = (failure) =>
     failure?.code === 9009 ||
     /not recognized as an internal or external command/i.test(failure?.stderr || "");
 
-const runPython = async (args, logger) => {
+const runPython = async (args, logger, options = {}) => {
     const attempts = [];
 
     for (const candidate of getPythonCandidates()) {
         try {
-            return await runPythonWithCandidate(candidate, args, logger);
+            return await runPythonWithCandidate(candidate, args, logger, options);
         } catch (failure) {
             attempts.push({ candidate, failure });
             if (!isCommandNotFound(failure)) {
@@ -174,7 +184,7 @@ export const extractPdfToJson = async (
     if (selectedPages?.length) {
         args.push("--pages", selectedPages.join(","));
     }
-    await runPython(args, logger);
+    await runPython(args, logger, { streamOutputToTerminal: false });
     return JSON.parse(fs.readFileSync(jsonPath, "utf8"));
 };
 
@@ -186,6 +196,6 @@ export const fillPdfFromJson = async (
 ) => {
     fs.mkdirSync(path.dirname(outputPath), { recursive: true });
     const args = ["fill", inputPath, translatedJsonPath, outputPath];
-    await runPython(args, logger);
+    await runPython(args, logger, { streamOutputToTerminal: false });
     return outputPath;
 };
