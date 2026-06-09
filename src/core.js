@@ -25,6 +25,7 @@ import {
 import { generateInitialGlossary } from "./content/glossary.js";
 import {
     collectVisibleTextNodes,
+    detectEpubBookStructuralMode,
     performTranslation,
 } from "./translation/translator.js";
 import { synchronizeTocHtml, synchronizeNcx } from "./epub/tocSync.js";
@@ -627,6 +628,11 @@ export const runTranslationJob = async ({
                 chapterMap.get(chapter.id),
             ]),
         );
+        const epubStructuralMode = detectEpubBookStructuralMode(
+            selectedChapters,
+            referencedIds,
+            definedClasses,
+        );
         const selectedCachedChapterCount = countCachedChapters(
             cache,
             selectedChapters,
@@ -673,6 +679,13 @@ export const runTranslationJob = async ({
             );
         }
 
+        if (epubStructuralMode.enabled) {
+            const summary = epubStructuralMode.summary || {};
+            console.log(
+                `\n🧱 EPUB structural mode enabled: analyzable=${summary.analyzableChapterCount ?? 0}, fallbackChapters=${summary.fallbackChapterCount ?? 0}, strongStructural=${summary.strongStructuralChapterCount ?? 0}`,
+            );
+        }
+
         await performTranslation(
             selectedChapters,
             chapterMap,
@@ -686,6 +699,7 @@ export const runTranslationJob = async ({
             definedClasses,
             "epub",
             debugMode,
+            epubStructuralMode,
         );
 
         await batchQueue.drainQueue();

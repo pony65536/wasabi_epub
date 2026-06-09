@@ -161,6 +161,21 @@ const BLOCKED_ANCESTOR_KEYWORDS = [
 
 const STRUCTURAL_ROOT_TAGS = new Set(["html", "head", "body"]);
 const SIMPLE_CONTAINER_TAGS = new Set(["span", "a", "div"]);
+const INLINE_FORMATTING_TAGS = new Set([
+    "span",
+    "a",
+    "em",
+    "strong",
+    "b",
+    "i",
+    "u",
+    "small",
+    "sup",
+    "sub",
+    "cite",
+    "q",
+    "abbr",
+]);
 const BLOCKED_DESCENDANT_TAGS = new Set([
     "script",
     "style",
@@ -251,7 +266,7 @@ const isSimpleTextContainer = ($, node) => {
     if (!SIMPLE_CONTAINER_TAGS.has(tagName)) return true;
 
     const directChildren = getDirectElementChildren($, node);
-    if (directChildren.length > 3) return false;
+    if (directChildren.length > 8) return false;
 
     return !directChildren.some((child) => {
         const childTag = getTagName(child);
@@ -276,6 +291,7 @@ const isSimpleTextContainer = ($, node) => {
                 "li",
                 "figure",
                 "figcaption",
+                "blockquote",
             ].includes(childTag)
         );
     });
@@ -424,13 +440,26 @@ export const isTextDominantNode = ($, node) => {
     if (isMostlySymbols(text)) return false;
 
     const directTextLength = getDirectText($, node).length;
-    const directElementChildren = getDirectElementChildren($, node).length;
+    const directElementChildren = getDirectElementChildren($, node);
+    const directElementChildCount = directElementChildren.length;
     const descendantElementCount = getDescendantElementCount($, node);
+    const hasOnlyInlineFormattingChildren =
+        directElementChildCount > 0 &&
+        directElementChildren.every((child) =>
+            INLINE_FORMATTING_TAGS.has(getTagName(child)),
+        );
 
-    if (directTextLength === 0) return false;
-    if (directElementChildren > 0 && directTextLength < 2) return false;
+    if (directTextLength === 0 && !hasOnlyInlineFormattingChildren) return false;
+    if (
+        directElementChildCount > 0 &&
+        directTextLength < 2 &&
+        !hasOnlyInlineFormattingChildren
+    ) {
+        return false;
+    }
 
-    const structuralCost = directElementChildren * 4 + Math.min(descendantElementCount, 8) * 2;
+    const structuralCost =
+        directElementChildCount * 4 + Math.min(descendantElementCount, 8) * 2;
     return text.length >= Math.max(3, structuralCost);
 };
 
@@ -763,6 +792,173 @@ const getTranslationPromptTemplate = (translationMode) => {
     return EPUB_TRANSLATION_PROMPT_TEMPLATE;
 };
 
+const estimateNodeTextLength = (html) => {
+    const $fragment = loadHtml(`<root>${String(html ?? "")}</root>`);
+    return normalizeText($fragment("root").text()).length;
+};
+
+const shouldUseEpubStructuralFallback = ($, explicitNodes) => {
+    const body = $("body");
+    const bodyTextLength = normalizeText((body.length ? body : $.root()).text()).length;
+    if (bodyTextLength < 80) return false;
+
+    const explicitTextLength = explicitNodes.reduce(
+        (sum, node) => sum + estimateNodeTextLength(node.content),
+        0,
+    );
+
+    if (explicitNodes.length === 0) return true;
+    if (explicitTextLength === 0) return true;
+    if (explicitNodes.length <= 2 && explicitTextLength < bodyTextLength * 0.35) {
+        return true;
+    }
+    return explicitTextLength < bodyTextLength * 0.25;
+};
+
+const STRUCTURAL_EXEMPT_TITLE_PATTERNS = [
+    /toc/i,
+    /table\s+of\s+contents/i,
+    /contents?/i,
+    /copyright/i,
+    /title\s*page/i,
+    /cover/i,
+    /dedication/i,
+    /acknowledg/i,
+    /preface/i,
+    /foreword/i,
+    /index/i,
+    /bibliograph/i,
+    /about\s+the\s+author/i,
+    /reviews?/i,
+];
+
+const buildEpubStructuralMetrics = (htmlContent, referencedIds, definedClasses) => {
+    const $ = loadHtml(htmlContent);
+    unwrapUselessSpans($, referencedIds, definedClasses);
+    const body = $("body").length ? $("body") : $.root();
+    const bodyTextLength = normalizeText(body.text()).length;
+
+    const explicitNodes = [];
+    $("p, li, h1, h2, h3, h4, h5, h6, caption, title").each((i, el) => {
+        const $el = $(el);
+        const originalHtml = $el.html()?.trim();
+        if (!originalHtml) return;
+        const classification = classifyNode({
+            tagName: el.name,
+            text: $el.text(),
+            html: originalHtml,
+        });
+        if (shouldBypassClassification(classification, "epub")) return;
+        explicitNodes.push({
+            id: `node_${i}`,
+            content: originalHtml,
+            node: el,
+        });
+    });
+
+    const explicitTextLength = explicitNodes.reduce(
+        (sum, node) => sum + estimateNodeTextLength(node.content),
+        0,
+    );
+    const structuralNodes = collectTranslatableNodes(
+        $,
+        body,
+        { write: () => {} },
+        false,
+    );
+    const structuralTextLength = structuralNodes.reduce(
+        (sum, node) => sum + estimateNodeTextLength(node.content),
+        0,
+    );
+
+    return {
+        bodyTextLength,
+        explicitNodeCount: explicitNodes.length,
+        explicitTextLength,
+        structuralNodeCount: structuralNodes.length,
+        structuralTextLength,
+        shouldFallback: shouldUseEpubStructuralFallback($, explicitNodes),
+    };
+};
+
+const shouldExemptChapterFromStructuralMode = (chapterTitle, metrics) => {
+    const title = String(chapterTitle || "").trim();
+    if (title && STRUCTURAL_EXEMPT_TITLE_PATTERNS.some((pattern) => pattern.test(title))) {
+        return true;
+    }
+    if (!metrics) return false;
+    if (metrics.bodyTextLength < 500) return true;
+    if (metrics.structuralNodeCount <= 1 && metrics.bodyTextLength < 1200) return true;
+    return false;
+};
+
+export const detectEpubBookStructuralMode = (
+    chapters,
+    referencedIds = new Set(),
+    definedClasses = new Set(),
+) => {
+    const analyzable = [];
+
+    for (const chapter of chapters || []) {
+        if (!chapter?.html || chapter?.isTOC) continue;
+        const metrics = buildEpubStructuralMetrics(
+            chapter.html,
+            referencedIds,
+            definedClasses,
+        );
+        if (metrics.bodyTextLength < 80) continue;
+        analyzable.push({
+            chapterId: chapter.id,
+            chapterTitle: chapter.title,
+            ...metrics,
+        });
+    }
+
+    if (analyzable.length === 0) {
+        return {
+            enabled: false,
+            reason: "no_analyzable_chapters",
+            chapterModes: {},
+            summary: null,
+        };
+    }
+
+    const strongStructuralChapters = analyzable.filter((chapter) => {
+        if (chapter.explicitNodeCount > 2) return false;
+        if (chapter.structuralNodeCount < 3) return false;
+        return chapter.structuralTextLength >= chapter.bodyTextLength * 0.45;
+    });
+    const fallbackChapters = analyzable.filter((chapter) => chapter.shouldFallback);
+    const enabled =
+        fallbackChapters.length >= Math.max(3, Math.ceil(analyzable.length * 0.45)) ||
+        strongStructuralChapters.length >= Math.max(2, Math.ceil(analyzable.length * 0.35));
+
+    const chapterModes = {};
+    if (enabled) {
+        for (const chapter of analyzable) {
+            chapterModes[chapter.chapterId] = {
+                preferStructuralNodes:
+                    chapter.shouldFallback &&
+                    !shouldExemptChapterFromStructuralMode(
+                        chapter.chapterTitle,
+                        chapter,
+                    ),
+            };
+        }
+    }
+
+    return {
+        enabled,
+        reason: enabled ? "book_level_structural_pattern" : "insufficient_structural_signal",
+        chapterModes,
+        summary: {
+            analyzableChapterCount: analyzable.length,
+            fallbackChapterCount: fallbackChapters.length,
+            strongStructuralChapterCount: strongStructuralChapters.length,
+        },
+    };
+};
+
 /**
  * 把章节内所有 batch 塞进全局队列，返回一个 Promise。
  * Promise resolve 时该章节已完全翻译完毕（含重试轮次）。
@@ -778,6 +974,7 @@ const enqueueChapterTranslation = (
     definedClasses,
     translationMode = "epub",
     debugMode = false,
+    chapterTranslationOptions = {},
 ) => {
     const $ = loadHtml(htmlContent);
     let subtitleProgress = null;
@@ -836,6 +1033,8 @@ const enqueueChapterTranslation = (
             : [];
 
     if (translationMode !== "html") {
+        const explicitNodes = [];
+
         $("p, li, h1, h2, h3, h4, h5, h6, caption, title").each((i, el) => {
             const $el = $(el);
             const originalHtml = $el.html()?.trim();
@@ -869,9 +1068,51 @@ const enqueueChapterTranslation = (
                 return;
             }
 
-            $el.attr("data-t-id", nodeId);
-            nodesToTranslate.push({ id: nodeId, content: originalHtml });
+            explicitNodes.push({ id: nodeId, content: originalHtml, node: el });
         });
+
+        const shouldFallback =
+            translationMode === "epub" &&
+            (
+                chapterTranslationOptions?.preferStructuralNodes ||
+                shouldUseEpubStructuralFallback($, explicitNodes)
+            );
+
+        if (shouldFallback) {
+            const root = $("body").length ? $("body") : $.root();
+            const structuralNodes = collectTranslatableNodes(
+                $,
+                root,
+                logger,
+                debugMode,
+            );
+
+            if (structuralNodes.length > 0) {
+                logger.write(
+                    "INFO",
+                    `Content Filter: ${JSON.stringify({
+                        status: "fallback",
+                        mode: chapterTranslationOptions?.preferStructuralNodes
+                            ? "epub_book_structural_mode"
+                            : "epub_structural_nodes",
+                        explicitNodeCount: explicitNodes.length,
+                        structuralNodeCount: structuralNodes.length,
+                    })}`,
+                );
+
+                for (const node of structuralNodes) {
+                    $(node.node).attr("data-t-id", node.id);
+                    nodesToTranslate.push({ id: node.id, content: node.content });
+                }
+            }
+        }
+
+        if (nodesToTranslate.length === 0) {
+            for (const node of explicitNodes) {
+                $(node.node).attr("data-t-id", node.id);
+                nodesToTranslate.push({ id: node.id, content: node.content });
+            }
+        }
     } else {
         for (const node of nodesToTranslate) {
             $(node.node).attr("data-t-id", node.id);
@@ -1113,6 +1354,7 @@ export const translateHtmlContent = async (
     definedClasses = new Set(),
     translationMode = "epub",
     debugMode = false,
+    chapterTranslationOptions = {},
 ) => {
     return enqueueChapterTranslation(
         htmlContent,
@@ -1125,6 +1367,7 @@ export const translateHtmlContent = async (
         definedClasses,
         translationMode,
         debugMode,
+        chapterTranslationOptions,
     );
 };
 
@@ -1142,6 +1385,7 @@ export const performTranslation = async (
     definedClasses = new Set(),
     translationMode = "epub",
     debugMode = false,
+    bookTranslationOptions = {},
 ) => {
     console.log(
         translationMode === "subtitle"
@@ -1183,6 +1427,7 @@ export const performTranslation = async (
             definedClasses,
             translationMode,
             debugMode,
+            bookTranslationOptions?.chapterModes?.[ch.id] || {},
         );
 
         // 每章独立 then：完成后立即写 cache，不等其他章节
