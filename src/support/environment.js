@@ -3,6 +3,11 @@ import fs from "fs";
 import path from "path";
 import { CURRENT_PROVIDER } from "../config.js";
 
+const MINIMUM_PYTHON_VERSION = {
+    major: 3,
+    minor: 10,
+};
+
 const PYTHON_CANDIDATES = () => {
     if (process.env.WASABI_PDF_PYTHON) {
         return [{ command: process.env.WASABI_PDF_PYTHON, args: [] }];
@@ -119,15 +124,57 @@ const runProcess = (command, args = [], options = {}) =>
         });
     });
 
-const createPythonNotFoundError = (attempts) =>
-    new Error(
-        `Python is not available for PDF support. Tried: ${attempts
-            .map((attempt) => formatCommand(attempt.command, attempt.args))
-            .join(", ")}.\n\nInstall Python 3, or set WASABI_PDF_PYTHON to an existing interpreter.\n\nThen run:\n\nnode index.js setup --pdf`,
-    );
-
 const extractVersionText = (result) =>
     String(result.stdout || result.stderr || "").trim().split(/\r?\n/)[0] || null;
+
+const parsePythonVersion = (versionText) => {
+    const match = String(versionText || "").match(
+        /Python\s+(\d+)\.(\d+)(?:\.(\d+))?/i,
+    );
+    if (!match) return null;
+    return {
+        major: Number.parseInt(match[1], 10),
+        minor: Number.parseInt(match[2], 10),
+        patch: Number.parseInt(match[3] || "0", 10),
+    };
+};
+
+const formatMinimumPythonVersion = () =>
+    `${MINIMUM_PYTHON_VERSION.major}.${MINIMUM_PYTHON_VERSION.minor}`;
+
+const isSupportedPythonVersion = (version) => {
+    if (!version) return false;
+    if (version.major !== MINIMUM_PYTHON_VERSION.major) {
+        return version.major > MINIMUM_PYTHON_VERSION.major;
+    }
+    return version.minor >= MINIMUM_PYTHON_VERSION.minor;
+};
+
+const createPythonSelectionError = (attempts) => {
+    const attemptSummary = attempts.length
+        ? attempts
+              .map((attempt) => {
+                  const label = formatCommand(attempt.command, attempt.args);
+                  return attempt.versionText
+                      ? `${label} (${attempt.versionText})`
+                      : label;
+              })
+              .join(", ")
+        : "python3, python";
+    const hasUnsupportedVersion = attempts.some(
+        (attempt) => attempt.reason === "unsupported_version",
+    );
+
+    if (hasUnsupportedVersion) {
+        return new Error(
+            `Python ${formatMinimumPythonVersion()}+ is required for PDF support. Tried: ${attemptSummary}.\n\nInstall Python ${formatMinimumPythonVersion()}+, or set WASABI_PDF_PYTHON to a compatible interpreter.\n\nThen run:\n\nnode index.js setup --pdf`,
+        );
+    }
+
+    return new Error(
+        `Python is not available for PDF support. Tried: ${attemptSummary}.\n\nInstall Python ${formatMinimumPythonVersion()}+, or set WASABI_PDF_PYTHON to an existing interpreter.\n\nThen run:\n\nnode index.js setup --pdf`,
+    );
+};
 
 export const getPythonSelection = async () => {
     const attempts = [];
@@ -138,14 +185,27 @@ export const getPythonSelection = async () => {
                 ...candidate.args,
                 "--version",
             ]);
-            return {
+            const selection = {
                 ...candidate,
                 displayCommand: formatCommand(candidate.command, candidate.args),
                 version: extractVersionText(result),
                 fromEnv: Boolean(process.env.WASABI_PDF_PYTHON),
             };
+            const parsedVersion = parsePythonVersion(selection.version);
+            if (!isSupportedPythonVersion(parsedVersion)) {
+                attempts.push({
+                    ...candidate,
+                    reason: "unsupported_version",
+                    versionText: selection.version,
+                });
+                continue;
+            }
+            return selection;
         } catch (failure) {
-            attempts.push(candidate);
+            attempts.push({
+                ...candidate,
+                reason: "not_found",
+            });
             if (!commandFailureLooksLikeNotFound(failure)) {
                 throw new Error(
                     `Failed to query Python version via ${formatCommand(candidate.command, candidate.args)}.${failure.stderr ? `\n${failure.stderr.trim()}` : ""}`,
@@ -160,7 +220,7 @@ export const getPythonSelection = async () => {
         displayCommand: null,
         version: null,
         fromEnv: Boolean(process.env.WASABI_PDF_PYTHON),
-        error: createPythonNotFoundError(attempts),
+        error: createPythonSelectionError(attempts),
     };
 };
 
@@ -170,7 +230,7 @@ export const runSelectedPython = async (
     options = {},
 ) => {
     if (!pythonSelection?.command) {
-        throw pythonSelection?.error || createPythonNotFoundError(PYTHON_CANDIDATES());
+        throw pythonSelection?.error || createPythonSelectionError(PYTHON_CANDIDATES());
     }
 
     return runProcess(
@@ -289,6 +349,10 @@ export const installPdfRequirements = async (
         );
     }
 
+    if (!pythonSelection?.command) {
+        throw pythonSelection?.error || createPythonSelectionError(PYTHON_CANDIDATES());
+    }
+
     await runSelectedPython(
         pythonSelection,
         ["-m", "pip", "install", "-r", requirementsPath],
@@ -322,6 +386,7 @@ export const runDoctor = async (runtimeConfig) => {
     );
     console.log(`Selected Python     ${pdfReport.python.displayCommand || "not found"}`);
     console.log(`Python Version      ${pdfReport.python.version || "unavailable"}`);
+    console.log(`Python Minimum      ${formatMinimumPythonVersion()}+`);
     console.log("");
 
     printSection("PDF Backend");
@@ -387,7 +452,7 @@ export const getPreflightReport = async (inputExt, runtimeConfig) => {
         report.pdfReport = await getPdfDependencyReport();
 
         if (!report.pdfReport.python.command) {
-            report.missing.push("Python");
+            report.missing.push(`Python ${formatMinimumPythonVersion()}+`);
         }
 
         for (const check of report.pdfReport.checks.filter(

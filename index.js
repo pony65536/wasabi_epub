@@ -41,7 +41,7 @@ const printUsageAndExit = (message) => {
 
     console.error("Usage:");
     console.error(
-        '  node index.js "your-book.epub|your-file.html|your-file.pdf|your-file.srt|your-video.mkv|your-video.mp4" [--chap "<selector>"] [--page "<selector>"] [--from "<lang>"] [--to "<lang>"] [--concurrency <n>] [--debug] [--install]',
+        '  node index.js "your-book.epub|your-file.html|your-file.pdf|your-file.srt|your-video.mkv|your-video.mp4" [--chap "<selector>"] [--page "<selector>"] [--from "<lang>"] [--to "<lang>"] [--concurrency <n>] [--debug]',
     );
     console.error("  node index.js doctor");
     console.error("  node index.js setup --pdf");
@@ -50,7 +50,6 @@ const printUsageAndExit = (message) => {
     console.error('  node index.js "book.epub"');
     console.error('  node index.js "book.epub" --chap "1,3,5"');
     console.error('  node index.js "paper.pdf" --to "zh"');
-    console.error('  node index.js "paper.pdf" --install');
     console.error("  node index.js doctor");
     console.error("  node index.js setup --pdf");
     process.exit(1);
@@ -137,7 +136,6 @@ const parseCliArgs = (argv) => {
         sourceLanguageExplicit: false,
         concurrency: null,
         debug: false,
-        install: false,
     };
 
     for (let i = 0; i < argv.length; i++) {
@@ -252,11 +250,6 @@ const parseCliArgs = (argv) => {
             continue;
         }
 
-        if (arg === "--install") {
-            result.install = true;
-            continue;
-        }
-
         if (arg.startsWith("--")) {
             printUsageAndExit(`Unknown option: ${arg}`);
         }
@@ -330,10 +323,7 @@ const handlePdfSetupCommand = async () => {
     console.log("PDF setup completed.");
 };
 
-const maybeInstallMissingPdfDependencies = async (
-    cliArgs,
-    preflightReport,
-) => {
+const maybeInstallMissingPdfDependencies = async (preflightReport) => {
     if (preflightReport.backendName !== "PDF") {
         return false;
     }
@@ -347,10 +337,6 @@ const maybeInstallMissingPdfDependencies = async (
 
     if (!process.stdin.isTTY || !process.stdout.isTTY) {
         return false;
-    }
-
-    if (cliArgs.install) {
-        console.log("Missing PDF dependencies detected.");
     }
 
     const confirmed = await promptForConfirmation(
@@ -395,10 +381,7 @@ const runTranslation = async (cliArgs) => {
 
     let preflightReport = await getPreflightReport(inputExt, runtimeConfig);
     if (!preflightReport.ready) {
-        const installed = await maybeInstallMissingPdfDependencies(
-            cliArgs,
-            preflightReport,
-        );
+        const installed = await maybeInstallMissingPdfDependencies(preflightReport);
         if (installed) {
             preflightReport = await getPreflightReport(inputExt, runtimeConfig);
         }

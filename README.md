@@ -115,7 +115,7 @@ WASABI_PDF_PYTHON=C:\path\to\python.exe
 基本格式：
 
 ```bash
-node index.js "input-file" [--chap "<selector>"] [--page "<selector>"] [--from "<lang>"] [--to "<lang>"] [--concurrency <n>] [--debug] [--install]
+node index.js "input-file" [--chap "<selector>"] [--page "<selector>"] [--from "<lang>"] [--to "<lang>"] [--concurrency <n>] [--debug]
 ```
 
 常见示例：
@@ -132,7 +132,6 @@ node index.js "chapter.html" --to "zh"
 
 node index.js "paper.pdf" --to "zh"
 node index.js "paper.pdf" --page "1,3,5" --to "zh"
-node index.js "paper.pdf" --install
 
 node index.js "episode.srt" --to "zh"
 node index.js "movie.mkv" --from "en" --to "zh"
@@ -148,7 +147,6 @@ node index.js "book.epub" --debug
 - `--to`：设置目标语言
 - `--concurrency`：设置并发数，必须为正整数
 - `--debug`：保留缓存目录和日志文件，便于排错
-- `--install`：显式允许当前 PDF 命令进入安装流程；在交互终端里会先确认，再安装缺失的 Python 依赖
 
 环境与安装命令：
 
@@ -263,12 +261,6 @@ node index.js "book.epub" --debug
 - `WASABI_PDF_PYTHON`
 
 也可以在运行 PDF 时直接让 Wasabi 尝试安装缺失依赖：
-
-```bash
-node index.js "paper.pdf" --install
-```
-
-在交互终端里，直接运行下面的命令，缺依赖时也会弹出安装确认：
 
 ```bash
 node index.js "paper.pdf"

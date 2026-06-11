@@ -115,7 +115,7 @@ WASABI_PDF_PYTHON=C:\path\to\python.exe
 Basic format:
 
 ```bash
-node index.js "input-file" [--chap "<selector>"] [--page "<selector>"] [--from "<lang>"] [--to "<lang>"] [--concurrency <n>] [--debug] [--install]
+node index.js "input-file" [--chap "<selector>"] [--page "<selector>"] [--from "<lang>"] [--to "<lang>"] [--concurrency <n>] [--debug]
 ```
 
 Common examples:
@@ -132,7 +132,6 @@ node index.js "chapter.html" --to "zh"
 
 node index.js "paper.pdf" --to "zh"
 node index.js "paper.pdf" --page "1,3,5" --to "zh"
-node index.js "paper.pdf" --install
 
 node index.js "episode.srt" --to "zh"
 node index.js "movie.mkv" --from "en" --to "zh"
@@ -148,7 +147,6 @@ Options:
 - `--to`: Set the target language
 - `--concurrency`: Set concurrency level (must be a positive integer)
 - `--debug`: Retain cache directories and log files for debugging
-- `--install`: Explicitly allow the current PDF command to enter the install flow; in an interactive terminal, Wasabi will confirm before installing missing Python dependencies
 
 Environment and setup commands:
 
@@ -263,12 +261,6 @@ If your Python is not in the default location, set:
 - `WASABI_PDF_PYTHON`
 
 You can also let Wasabi install missing PDF dependencies before the run:
-
-```bash
-node index.js "paper.pdf" --install
-```
-
-In an interactive terminal, the plain command below will also prompt when dependencies are missing:
 
 ```bash
 node index.js "paper.pdf"
