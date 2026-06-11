@@ -47,28 +47,11 @@ PDF example (source page / translated page):
 
 ## Requirements
 
-Base requirements:
-
-- Node.js 18+
-- npm
-
-Additional requirements for PDF mode:
-
-- A working Python environment
-- Python dependencies listed in [src/pdf/requirements.txt](/f:/wasabi/wasabi_fork/wasabi_epub/src/pdf/requirements.txt:1)
-- If needed, pin a specific Python via `WASABI_PDF_PYTHON`
-- Python selection order is: `WASABI_PDF_PYTHON` -> `python3` -> `python`
-
-Additional requirements for video / subtitle track mode:
-
-- `ffmpeg`
-- `ffprobe`
-- Both commands must be available in `PATH`
-
-Additional recommendation for PDF Chinese back-fill:
-
-- CJK fonts must be available on the system
-- To specify a font manually, set `PDF_FONT_FILE` or `WASABI_PDF_FONT`
+- [Node.js](https://nodejs.org/) 18+
+- [npm](https://www.npmjs.com/)
+- [Python](https://www.python.org/) 3.10+
+- Video subtitle workflows require `ffmpeg` and `ffprobe` in `PATH`
+- For better Chinese PDF back-fill, a usable CJK font is recommended
 
 ## Installation
 
@@ -76,24 +59,6 @@ Install Node dependencies first:
 
 ```bash
 npm install
-```
-
-PDF does not need to be called out as a separate primary install step anymore. In the normal case, just run:
-
-```bash
-node index.js "paper.pdf"
-```
-
-If PDF dependencies are missing:
-
-- in an interactive terminal, Wasabi will ask whether to install them
-- in a non-interactive environment, Wasabi will print the remediation commands
-
-If you prefer to handle PDF setup manually or inspect the environment first, you can also run:
-
-```bash
-node index.js setup --pdf
-node index.js doctor
 ```
 
 ## Configuration
@@ -189,12 +154,6 @@ Environment and setup commands:
 
 - `node index.js doctor`: Read-only checks for Node, Python, PDF, video, and API key readiness
 - `node index.js setup --pdf`: Manually installs PDF dependencies using the selected Python
-
-Default behavior when PDF dependencies are missing:
-
-- In an interactive terminal, running `node index.js "paper.pdf"` will prompt to install them
-- In a non-interactive environment, Wasabi will report the missing dependencies and exit instead of waiting for input
-- With `--install`, Wasabi enters the same confirmation/install flow explicitly
 
 ## Selector Syntax
 

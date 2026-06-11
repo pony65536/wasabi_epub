@@ -47,28 +47,11 @@ PDF 示例（英文原页 / 中文输出）：
 
 ## 环境要求
 
-基础要求：
-
-- Node.js 18+
-- npm
-
-PDF 模式额外要求：
-
-- 可用的 Python 环境
-- Python 依赖安装自 [src/pdf/requirements.txt](/f:/wasabi/wasabi_fork/wasabi_epub/src/pdf/requirements.txt:1)
-- 如需固定使用某个 Python，可在 `.env` 中设置 `WASABI_PDF_PYTHON`
-- Python 选择顺序为：`WASABI_PDF_PYTHON` -> `python3` -> `python`
-
-视频 / 字幕轨模式额外要求：
-
-- `ffmpeg`
-- `ffprobe`
-- 这两个命令需要在 `PATH` 中可用
-
-PDF 中文回填额外建议：
-
-- 系统中需要可用的 CJK 字体
-- 如需手动指定字体，可设置 `PDF_FONT_FILE` 或 `WASABI_PDF_FONT`
+- [Node.js](https://nodejs.org/) 18+
+- [npm](https://www.npmjs.com/)
+- [Python](https://www.python.org/) 3.10+
+- 视频字幕模式需要 `ffmpeg` 和 `ffprobe` 在 `PATH` 中可用
+- 如需改善 PDF 中文回填效果，建议系统中安装可用的 CJK 字体
 
 ## 安装
 
@@ -76,24 +59,6 @@ PDF 中文回填额外建议：
 
 ```bash
 npm install
-```
-
-PDF 不需要作为主安装流程单独说明。正常情况下，直接运行：
-
-```bash
-node index.js "paper.pdf"
-```
-
-如果当前环境缺少 PDF 依赖：
-
-- 交互终端里会直接询问是否安装
-- 非交互环境里会给出修复命令
-
-如果你想手动处理 PDF 依赖或排查环境，也可以使用：
-
-```bash
-node index.js setup --pdf
-node index.js doctor
 ```
 
 ## 配置
@@ -189,12 +154,6 @@ node index.js "book.epub" --debug
 
 - `node index.js doctor`：只读检查 Node、Python、PDF、视频和 API key 环境
 - `node index.js setup --pdf`：手动使用选中的 Python 安装 PDF 依赖
-
-PDF 依赖缺失时的默认行为：
-
-- 交互终端里，直接运行 `node index.js "paper.pdf"` 会询问是否现在安装依赖
-- 非交互环境里，不会卡住等待输入，而是直接报告缺失依赖并退出
-- 带 `--install` 时，仍然会进入同一个安装确认流程
 
 ## 选择器语法
 

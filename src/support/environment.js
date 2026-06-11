@@ -123,7 +123,7 @@ const createPythonNotFoundError = (attempts) =>
     new Error(
         `Python is not available for PDF support. Tried: ${attempts
             .map((attempt) => formatCommand(attempt.command, attempt.args))
-            .join(", ")}.\n\nRun:\n\nnode index.js doctor`,
+            .join(", ")}.\n\nInstall Python 3, or set WASABI_PDF_PYTHON to an existing interpreter.\n\nThen run:\n\nnode index.js setup --pdf`,
     );
 
 const extractVersionText = (result) =>
@@ -426,10 +426,6 @@ export const formatPreflightFailureMessage = (preflightReport, inputFileName) =>
         lines.push("Run:");
         lines.push("");
         lines.push("node index.js setup --pdf");
-        lines.push("");
-        lines.push("or rerun with:");
-        lines.push("");
-        lines.push(`node index.js "${inputFileName}" --install`);
     } else if (preflightReport.backendName === "Video") {
         lines.push("");
         lines.push("Install ffmpeg and ffprobe, then rerun `node index.js doctor`.");
@@ -454,10 +450,6 @@ export const formatPdfBackendError = (message) => {
             "Run:",
             "",
             "node index.js setup --pdf",
-            "",
-            "or:",
-            "",
-            'node index.js "your.pdf" --install',
         ].join("\n");
     }
 
