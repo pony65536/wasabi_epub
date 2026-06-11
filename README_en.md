@@ -78,27 +78,29 @@ Install Node dependencies first:
 npm install
 ```
 
-If you need to process PDFs, also install the PDF Python dependencies:
+PDF does not need to be called out as a separate primary install step anymore. In the normal case, just run:
 
 ```bash
-python -m pip install -r src/pdf/requirements.txt
+node index.js "paper.pdf"
 ```
 
-Or:
+If PDF dependencies are missing:
+
+- in an interactive terminal, Wasabi will ask whether to install them
+- in a non-interactive environment, Wasabi will print the remediation commands
+
+If you prefer to handle PDF setup manually or inspect the environment first, you can also run:
 
 ```bash
-npm run pdf:install
-```
-
-You can also run a read-only environment diagnostic first:
-
-```bash
+node index.js setup --pdf
 node index.js doctor
 ```
 
 ## Configuration
 
 Create a `.env` file in the project root.
+
+You can start from [.env_example](/f:/wasabi/wasabi_fork/wasabi_epub/.env_example:1).
 
 Minimal example:
 
@@ -186,7 +188,7 @@ Options:
 Environment and setup commands:
 
 - `node index.js doctor`: Read-only checks for Node, Python, PDF, video, and API key readiness
-- `node index.js setup --pdf`: Installs PDF dependencies using the selected Python
+- `node index.js setup --pdf`: Manually installs PDF dependencies using the selected Python
 
 Default behavior when PDF dependencies are missing:
 

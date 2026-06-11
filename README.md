@@ -78,27 +78,29 @@ PDF 中文回填额外建议：
 npm install
 ```
 
-如果你要处理 PDF，再安装 PDF 的 Python 依赖：
+PDF 不需要作为主安装流程单独说明。正常情况下，直接运行：
 
 ```bash
-python -m pip install -r src/pdf/requirements.txt
+node index.js "paper.pdf"
 ```
 
-或者：
+如果当前环境缺少 PDF 依赖：
+
+- 交互终端里会直接询问是否安装
+- 非交互环境里会给出修复命令
+
+如果你想手动处理 PDF 依赖或排查环境，也可以使用：
 
 ```bash
-npm run pdf:install
-```
-
-安装前也可以先执行环境诊断：
-
-```bash
+node index.js setup --pdf
 node index.js doctor
 ```
 
 ## 配置
 
 在项目根目录创建 `.env`。
+
+可以直接参考 [.env_example](/f:/wasabi/wasabi_fork/wasabi_epub/.env_example:1)。
 
 最小示例：
 
@@ -186,7 +188,7 @@ node index.js "book.epub" --debug
 环境与安装命令：
 
 - `node index.js doctor`：只读检查 Node、Python、PDF、视频和 API key 环境
-- `node index.js setup --pdf`：使用选中的 Python 安装 PDF 依赖
+- `node index.js setup --pdf`：手动使用选中的 Python 安装 PDF 依赖
 
 PDF 依赖缺失时的默认行为：
 
