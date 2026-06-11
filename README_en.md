@@ -57,6 +57,7 @@ Additional requirements for PDF mode:
 - A working Python environment
 - Python dependencies listed in [src/pdf/requirements.txt](/f:/wasabi/wasabi_fork/wasabi_epub/src/pdf/requirements.txt:1)
 - If needed, pin a specific Python via `WASABI_PDF_PYTHON`
+- Python selection order is: `WASABI_PDF_PYTHON` -> `python3` -> `python`
 
 Additional requirements for video / subtitle track mode:
 
@@ -87,6 +88,12 @@ Or:
 
 ```bash
 npm run pdf:install
+```
+
+You can also run a read-only environment diagnostic first:
+
+```bash
+node index.js doctor
 ```
 
 ## Configuration
@@ -141,12 +148,15 @@ WASABI_PDF_PYTHON=C:\path\to\python.exe
 Basic format:
 
 ```bash
-node index.js "input-file" [--chap "<selector>"] [--page "<selector>"] [--from "<lang>"] [--to "<lang>"] [--concurrency <n>] [--debug]
+node index.js "input-file" [--chap "<selector>"] [--page "<selector>"] [--from "<lang>"] [--to "<lang>"] [--concurrency <n>] [--debug] [--install]
 ```
 
 Common examples:
 
 ```bash
+node index.js doctor
+node index.js setup --pdf
+
 node index.js "book.epub"
 node index.js "book.epub" --to "fr"
 node index.js "book.epub" --chap "1-3"
@@ -155,6 +165,7 @@ node index.js "chapter.html" --to "zh"
 
 node index.js "paper.pdf" --to "zh"
 node index.js "paper.pdf" --page "1,3,5" --to "zh"
+node index.js "paper.pdf" --install
 
 node index.js "episode.srt" --to "zh"
 node index.js "movie.mkv" --from "en" --to "zh"
@@ -170,6 +181,18 @@ Options:
 - `--to`: Set the target language
 - `--concurrency`: Set concurrency level (must be a positive integer)
 - `--debug`: Retain cache directories and log files for debugging
+- `--install`: Explicitly allow the current PDF command to enter the install flow; in an interactive terminal, Wasabi will confirm before installing missing Python dependencies
+
+Environment and setup commands:
+
+- `node index.js doctor`: Read-only checks for Node, Python, PDF, video, and API key readiness
+- `node index.js setup --pdf`: Installs PDF dependencies using the selected Python
+
+Default behavior when PDF dependencies are missing:
+
+- In an interactive terminal, running `node index.js "paper.pdf"` will prompt to install them
+- In a non-interactive environment, Wasabi will report the missing dependencies and exit instead of waiting for input
+- With `--install`, Wasabi enters the same confirmation/install flow explicitly
 
 ## Selector Syntax
 
@@ -219,7 +242,7 @@ Supported common aliases:
 - Node handles the main orchestration; Python handles extraction and back-fill
 - Supports `--page`
 - Preserves images, vector graphics, headers, footers, and other non-body regions as much as possible
-- Uses `WASABI_PDF_PYTHON` first if set, otherwise falls back to system `python`
+- Python selection order is `WASABI_PDF_PYTHON` -> `python3` -> `python`
 
 ### SRT
 
@@ -269,20 +292,32 @@ Typical output filenames:
 
 Check:
 
-- Have you run `python -m pip install -r src/pdf/requirements.txt`?
-- Is `python` available on your system?
+- Have you run `node index.js doctor`?
+- Have you run `node index.js setup --pdf`?
+- Is `python3` or `python` available on your system?
 - If you use a custom environment, did you set `WASABI_PDF_PYTHON`?
 
-If your Python is not in the default location, you can also set:
+If your Python is not in the default location, set:
 
 - `WASABI_PDF_PYTHON`
-- `PYTHON`
-- `PYTHON_BIN`
+
+You can also let Wasabi install missing PDF dependencies before the run:
+
+```bash
+node index.js "paper.pdf" --install
+```
+
+In an interactive terminal, the plain command below will also prompt when dependencies are missing:
+
+```bash
+node index.js "paper.pdf"
+```
 
 ### 2. Video subtitle mode errors
 
 Check:
 
+- Have you run `node index.js doctor`?
 - Are `ffmpeg` and `ffprobe` installed?
 - Can you run both commands directly from the terminal?
 - Does the input video have a usable text subtitle track, or is there an external subtitle file in the same directory?

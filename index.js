@@ -1,6 +1,7 @@
 import "dotenv/config";
 import fs from "fs";
 import path from "path";
+import { createInterface } from "readline/promises";
 import { fileURLToPath } from "url";
 import {
     DEFAULT_SOURCE_LANGUAGE,
@@ -8,15 +9,29 @@ import {
     createRuntimeConfig,
 } from "./src/config.js";
 import {
-    runHtmlTranslationJob,
-    runPdfTranslationJob,
-    runSubtitleTranslationJob,
-    runTranslationJob,
-} from "./src/core.js";
+    formatPreflightFailureMessage,
+    getPdfDependencyReport,
+    getPreflightReport,
+    installPdfRequirements,
+    runDoctor,
+} from "./src/support/environment.js";
 import { parsePageSelector } from "./src/support/pageSelection.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+
+const SUPPORTED_INPUT_EXTENSIONS = [
+    ".epub",
+    ".html",
+    ".htm",
+    ".pdf",
+    ".srt",
+    ".mkv",
+    ".mp4",
+    ".mov",
+    ".m4v",
+    ".webm",
+];
 
 const printUsageAndExit = (message) => {
     if (message) {
@@ -24,26 +39,20 @@ const printUsageAndExit = (message) => {
         console.error("");
     }
 
+    console.error("Usage:");
     console.error(
-        'Usage: node index.js "your-book.epub|your-file.html|your-file.pdf|your-file.srt|your-video.mkv|your-video.mp4" [--chap "<selector>"] [--page "<selector>"] [--from "<lang>"] [--to "<lang>"] [--concurrency <n>] [--debug]',
+        '  node index.js "your-book.epub|your-file.html|your-file.pdf|your-file.srt|your-video.mkv|your-video.mp4" [--chap "<selector>"] [--page "<selector>"] [--from "<lang>"] [--to "<lang>"] [--concurrency <n>] [--debug] [--install]',
     );
+    console.error("  node index.js doctor");
+    console.error("  node index.js setup --pdf");
     console.error("");
     console.error("Examples:");
     console.error('  node index.js "book.epub"');
     console.error('  node index.js "book.epub" --chap "1,3,5"');
-    console.error('  node index.js "book.epub" --chap "1-3"');
-    console.error(
-        '  node index.js "book.epub" --chap "\'Blackhole\'-\'Gravity\'"',
-    );
-    console.error('  node index.js "book.epub" --from "es" --to "zh"');
-    console.error('  node index.js "book.epub" --to "fr"');
-    console.error('  node index.js "book.epub" --concurrency 5');
-    console.error('  node index.js "book.epub" --debug');
-    console.error('  node index.js "chapter.html" --to "zh"');
     console.error('  node index.js "paper.pdf" --to "zh"');
-    console.error('  node index.js "paper.pdf" --page "1,3,5" --to "zh"');
-    console.error('  node index.js "episode.srt" --to "zh"');
-    console.error('  node index.js "episode.mkv" --from "en" --to "zh"');
+    console.error('  node index.js "paper.pdf" --install');
+    console.error("  node index.js doctor");
+    console.error("  node index.js setup --pdf");
     process.exit(1);
 };
 
@@ -101,7 +110,25 @@ const resolveTargetLanguage = (value) => {
 };
 
 const parseCliArgs = (argv) => {
+    const firstArg = argv[0];
+
+    if (firstArg === "doctor") {
+        if (argv.length !== 1) {
+            printUsageAndExit("`doctor` does not accept extra arguments.");
+        }
+        return { mode: "doctor" };
+    }
+
+    if (firstArg === "setup") {
+        const flags = argv.slice(1);
+        if (flags.length !== 1 || flags[0] !== "--pdf") {
+            printUsageAndExit("Usage: node index.js setup --pdf");
+        }
+        return { mode: "setup", setupTarget: "pdf" };
+    }
+
     const result = {
+        mode: "translate",
         inputFileName: null,
         chapterSelector: null,
         pageSelector: null,
@@ -110,6 +137,7 @@ const parseCliArgs = (argv) => {
         sourceLanguageExplicit: false,
         concurrency: null,
         debug: false,
+        install: false,
     };
 
     for (let i = 0; i < argv.length; i++) {
@@ -224,6 +252,11 @@ const parseCliArgs = (argv) => {
             continue;
         }
 
+        if (arg === "--install") {
+            result.install = true;
+            continue;
+        }
+
         if (arg.startsWith("--")) {
             printUsageAndExit(`Unknown option: ${arg}`);
         }
@@ -256,9 +289,7 @@ const resolveInputPath = (inputFileName) => {
     }
 
     const ext = path.extname(inputPath).toLowerCase();
-    if (
-        ![".epub", ".html", ".htm", ".pdf", ".srt", ".mkv", ".mp4", ".mov", ".m4v", ".webm"].includes(ext)
-    ) {
+    if (!SUPPORTED_INPUT_EXTENSIONS.includes(ext)) {
         printUsageAndExit(
             `Input file must be an EPUB, HTML, PDF, SRT, or supported video file: ${inputFileName}`,
         );
@@ -267,8 +298,83 @@ const resolveInputPath = (inputFileName) => {
     return inputPath;
 };
 
-const main = async () => {
-    const cliArgs = parseCliArgs(process.argv.slice(2));
+const promptForConfirmation = async (question) => {
+    if (!process.stdin.isTTY || !process.stdout.isTTY) {
+        return false;
+    }
+
+    const rl = createInterface({
+        input: process.stdin,
+        output: process.stdout,
+    });
+
+    try {
+        const answer = await rl.question(`${question} `);
+        const normalized = String(answer || "").trim().toLowerCase();
+        return normalized === "" || normalized === "y" || normalized === "yes";
+    } finally {
+        rl.close();
+    }
+};
+
+const handlePdfSetupCommand = async () => {
+    const pdfReport = await getPdfDependencyReport();
+    if (!pdfReport.python.command) {
+        throw pdfReport.python.error;
+    }
+
+    console.log(`Using Python: ${pdfReport.python.displayCommand}`);
+    console.log("Installing PDF dependencies from src/pdf/requirements.txt...");
+    await installPdfRequirements(__dirname, pdfReport.python);
+    console.log("");
+    console.log("PDF setup completed.");
+};
+
+const maybeInstallMissingPdfDependencies = async (
+    cliArgs,
+    preflightReport,
+) => {
+    if (preflightReport.backendName !== "PDF") {
+        return false;
+    }
+
+    const installableMissing = preflightReport.missing.filter((entry) =>
+        ["Python", "PyMuPDF", "pikepdf"].includes(entry),
+    );
+    if (installableMissing.length === 0) {
+        return false;
+    }
+
+    if (!process.stdin.isTTY || !process.stdout.isTTY) {
+        return false;
+    }
+
+    if (cliArgs.install) {
+        console.log("Missing PDF dependencies detected.");
+    }
+
+    const confirmed = await promptForConfirmation(
+        "Install missing PDF dependencies now? [Y/n]",
+    );
+    if (!confirmed) {
+        console.error("Installation declined. Exiting.");
+        process.exit(1);
+    }
+
+    const pdfReport = preflightReport.pdfReport || (await getPdfDependencyReport());
+    if (!pdfReport.python.command) {
+        throw pdfReport.python.error;
+    }
+
+    console.log(`Using Python: ${pdfReport.python.displayCommand}`);
+    console.log("Installing PDF dependencies...");
+    await installPdfRequirements(__dirname, pdfReport.python);
+    console.log("");
+    console.log("PDF dependencies installed. Continuing...");
+    return true;
+};
+
+const runTranslation = async (cliArgs) => {
     const inputPath = resolveInputPath(cliArgs.inputFileName);
     const inputExt = path.extname(inputPath).toLowerCase();
     let selectedPages = null;
@@ -287,64 +393,112 @@ const main = async () => {
         concurrency: cliArgs.concurrency,
     });
 
-    try {
-        if (inputExt === ".epub") {
-            if (cliArgs.pageSelector) {
-                printUsageAndExit("--page is only supported for PDF input.");
-            }
-            await runTranslationJob({
-                projectRoot: __dirname,
-                inputPath,
-                chapterSelector: cliArgs.chapterSelector,
-                debugMode: cliArgs.debug,
-                runtimeConfig,
-            });
-        } else if (inputExt === ".pdf") {
-            if (cliArgs.chapterSelector) {
-                printUsageAndExit("--chap is only supported for EPUB input.");
-            }
-
-            await runPdfTranslationJob({
-                projectRoot: __dirname,
-                inputPath,
-                pageSelector: cliArgs.pageSelector,
-                selectedPages,
-                debugMode: cliArgs.debug,
-                runtimeConfig,
-            });
-        } else if (inputExt === ".html" || inputExt === ".htm") {
-            if (cliArgs.chapterSelector) {
-                printUsageAndExit("--chap is only supported for EPUB input.");
-            }
-            if (cliArgs.pageSelector) {
-                printUsageAndExit("--page is only supported for PDF input.");
-            }
-
-            await runHtmlTranslationJob({
-                projectRoot: __dirname,
-                inputPath,
-                debugMode: cliArgs.debug,
-                runtimeConfig,
-            });
-        } else {
-            if (cliArgs.chapterSelector) {
-                printUsageAndExit("--chap is only supported for EPUB input.");
-            }
-            if (cliArgs.pageSelector) {
-                printUsageAndExit("--page is only supported for PDF input.");
-            }
-
-            await runSubtitleTranslationJob({
-                projectRoot: __dirname,
-                inputPath,
-                debugMode: cliArgs.debug,
-                runtimeConfig,
-                sourceLanguageExplicit: cliArgs.sourceLanguageExplicit,
-            });
+    let preflightReport = await getPreflightReport(inputExt, runtimeConfig);
+    if (!preflightReport.ready) {
+        const installed = await maybeInstallMissingPdfDependencies(
+            cliArgs,
+            preflightReport,
+        );
+        if (installed) {
+            preflightReport = await getPreflightReport(inputExt, runtimeConfig);
         }
+    }
+
+    if (!preflightReport.ready) {
+        console.error(
+            formatPreflightFailureMessage(preflightReport, cliArgs.inputFileName),
+        );
+        process.exit(1);
+    }
+
+    const {
+        runHtmlTranslationJob,
+        runPdfTranslationJob,
+        runSubtitleTranslationJob,
+        runTranslationJob,
+    } = await import("./src/core.js");
+
+    if (inputExt === ".epub") {
+        if (cliArgs.pageSelector) {
+            printUsageAndExit("--page is only supported for PDF input.");
+        }
+        await runTranslationJob({
+            projectRoot: __dirname,
+            inputPath,
+            chapterSelector: cliArgs.chapterSelector,
+            debugMode: cliArgs.debug,
+            runtimeConfig,
+        });
+        return;
+    }
+
+    if (inputExt === ".pdf") {
+        if (cliArgs.chapterSelector) {
+            printUsageAndExit("--chap is only supported for EPUB input.");
+        }
+
+        await runPdfTranslationJob({
+            projectRoot: __dirname,
+            inputPath,
+            pageSelector: cliArgs.pageSelector,
+            selectedPages,
+            debugMode: cliArgs.debug,
+            runtimeConfig,
+        });
+        return;
+    }
+
+    if (inputExt === ".html" || inputExt === ".htm") {
+        if (cliArgs.chapterSelector) {
+            printUsageAndExit("--chap is only supported for EPUB input.");
+        }
+        if (cliArgs.pageSelector) {
+            printUsageAndExit("--page is only supported for PDF input.");
+        }
+
+        await runHtmlTranslationJob({
+            projectRoot: __dirname,
+            inputPath,
+            debugMode: cliArgs.debug,
+            runtimeConfig,
+        });
+        return;
+    }
+
+    if (cliArgs.chapterSelector) {
+        printUsageAndExit("--chap is only supported for EPUB input.");
+    }
+    if (cliArgs.pageSelector) {
+        printUsageAndExit("--page is only supported for PDF input.");
+    }
+
+    await runSubtitleTranslationJob({
+        projectRoot: __dirname,
+        inputPath,
+        debugMode: cliArgs.debug,
+        runtimeConfig,
+        sourceLanguageExplicit: cliArgs.sourceLanguageExplicit,
+    });
+};
+
+const main = async () => {
+    const cliArgs = parseCliArgs(process.argv.slice(2));
+
+    try {
+        if (cliArgs.mode === "doctor") {
+            await runDoctor(createRuntimeConfig());
+            return;
+        }
+
+        if (cliArgs.mode === "setup") {
+            await handlePdfSetupCommand();
+            return;
+        }
+
+        await runTranslation(cliArgs);
     } catch (error) {
         console.error("Fatal error occurred.", error.message);
-        if (cliArgs.debug) {
+        if (cliArgs?.debug) {
             console.error("Check logs for details.");
         }
         process.exit(1);

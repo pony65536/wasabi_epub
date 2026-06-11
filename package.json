@@ -2,7 +2,7 @@
     "main": "bot.js",
     "type": "module",
     "scripts": {
-        "pdf:install": "python -m pip install -r src/pdf/requirements.txt"
+        "pdf:install": "node index.js setup --pdf"
     },
     "dependencies": {
         "@google/generative-ai": "^0.24.1",
