@@ -47,14 +47,31 @@ OUTPUT: A JSON object:
         );
 
         const chapterMap = new Map(chapters.map((c) => [c.id, c]));
-        const ordered = result.order
-            .filter((id) => chapterMap.has(id))
+        let droppedCount = 0;
+        const seenIds = new Set();
+        const orderedIds = Array.isArray(result?.order) ? result.order : [];
+        const ordered = orderedIds
+            .filter((id) => {
+                if (!chapterMap.has(id) || seenIds.has(id)) {
+                    droppedCount += 1;
+                    return false;
+                }
+                seenIds.add(id);
+                return true;
+            })
             .map((id) => {
                 const ch = chapterMap.get(id);
                 if (id === result.tocId) ch.isTOC = true;
                 chapterMap.delete(id);
                 return ch;
             });
+
+        if (droppedCount > 0) {
+            logger.write(
+                "WARN",
+                `Dropped ${droppedCount} invalid entries from translation plan.`,
+            );
+        }
 
         return {
             sorted: [...ordered, ...chapterMap.values()],

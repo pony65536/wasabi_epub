@@ -361,7 +361,23 @@ const moveFileIfNeeded = (sourcePath, targetPath) => {
     if (fs.existsSync(resolvedTarget)) {
         fs.unlinkSync(resolvedTarget);
     }
-    fs.renameSync(resolvedSource, resolvedTarget);
+    try {
+        fs.renameSync(resolvedSource, resolvedTarget);
+        return;
+    } catch (error) {
+        if (!["EPERM", "EXDEV", "EBUSY"].includes(error?.code)) {
+            throw error;
+        }
+    }
+
+    fs.copyFileSync(resolvedSource, resolvedTarget);
+    try {
+        fs.unlinkSync(resolvedSource);
+    } catch {
+        console.warn(
+            `⚠️  Source file could not be removed after copying to input: ${path.basename(resolvedSource)}`,
+        );
+    }
 };
 
 const collectReferencedIds = (chapterMap) => {
@@ -510,6 +526,34 @@ const createHtmlGlossarySourceMap = (chapterMap) => {
     return glossarySourceMap;
 };
 
+const sanitizeCachedPlan = (plan, chapterMap, logger) => {
+    if (!plan || !Array.isArray(plan.sorted)) return null;
+
+    let droppedCount = 0;
+    const seenIds = new Set();
+    const sorted = plan.sorted.filter((chapter) => {
+        const id = chapter?.id;
+        if (!id || !chapterMap.has(id) || seenIds.has(id)) {
+            droppedCount += 1;
+            return false;
+        }
+        seenIds.add(id);
+        return true;
+    });
+
+    if (droppedCount > 0) {
+        logger.write(
+            "WARN",
+            `Dropped ${droppedCount} invalid cached chapters from translation plan.`,
+        );
+    }
+
+    return {
+        ...plan,
+        sorted,
+    };
+};
+
 const saveHtmlDocument = async (outputPath, html, logger) => {
     console.log(`\n💾 Step 5: Finalizing and Saving...`);
     try {
@@ -605,7 +649,8 @@ export const runTranslationJob = async ({
 
         if (cachedPlan) {
             console.log("\n🕵️ Step 1: Loading translation plan from cache...");
-            plan = cachedPlan;
+            plan = sanitizeCachedPlan(cachedPlan, chapterMap, logger) || cachedPlan;
+            cache.savePlan(plan);
             if (plan.tocId) {
                 const tocChapter = chapterMap.get(plan.tocId);
                 if (tocChapter) tocChapter.isTOC = true;
