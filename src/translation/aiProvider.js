@@ -29,6 +29,42 @@ export const isContentPolicyError = (err) => {
     return !excludedSignals.some((token) => message.includes(token));
 };
 
+const buildDeprecatedModelGuidance = (client, err) => {
+    const message = String(err?.message || "");
+    const normalized = message.toLowerCase();
+    const isDeprecatedModelError =
+        normalized.includes("deprecated") ||
+        normalized.includes("decommissioned") ||
+        normalized.includes("no longer available") ||
+        normalized.includes("model not found") ||
+        normalized.includes("unknown model");
+
+    if (!isDeprecatedModelError) return null;
+
+    const providerLine = `Provider: ${client.providerName}`;
+    const modelLine = `Model: ${client.modelName}`;
+
+    if (client.providerName === "openrouter") {
+        return [
+            "Configured fallback model is no longer available.",
+            providerLine,
+            modelLine,
+            "",
+            "Update your environment config, for example:",
+            "FALLBACK_MODEL=x-ai/grok-4.3",
+            "OPENROUTER_MODEL=x-ai/grok-4.3",
+        ].join("\n");
+    }
+
+    return [
+        "Configured model is no longer available.",
+        providerLine,
+        modelLine,
+        "",
+        "Update the model name in your environment configuration.",
+    ].join("\n");
+};
+
 const buildProviderClient = (providerName, config) => {
     const providerConfig = config[providerName];
     if (!providerConfig) throw new Error(`Unknown provider: ${providerName}`);
@@ -140,6 +176,13 @@ export const createAIProvider = (
                         forceJsonMode,
                     );
                 } catch (fallbackError) {
+                    const guidance = buildDeprecatedModelGuidance(
+                        fallbackClient,
+                        fallbackError,
+                    );
+                    if (guidance) {
+                        fallbackError.message = `${fallbackError.message}\n\n${guidance}`;
+                    }
                     logger.write(
                         "ERROR",
                         `Fallback callAI Failed: ${fallbackError.stack || fallbackError.message}`,
@@ -148,6 +191,10 @@ export const createAIProvider = (
                 }
             }
 
+            const guidance = buildDeprecatedModelGuidance(primaryClient, e);
+            if (guidance) {
+                e.message = `${e.message}\n\n${guidance}`;
+            }
             logger.write(
                 "ERROR",
                 `callAI Failed: ${e.stack || e.message}`,

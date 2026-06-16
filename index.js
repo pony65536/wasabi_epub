@@ -481,6 +481,9 @@ const main = async () => {
         await runTranslation(cliArgs);
     } catch (error) {
         console.error("Fatal error occurred.", error.message);
+        if (String(error?.message || "").includes("Configured fallback model is no longer available.")) {
+            console.error("\nUpdate `.env` and retry.");
+        }
         if (cliArgs?.debug) {
             console.error("Check logs for details.");
         }
