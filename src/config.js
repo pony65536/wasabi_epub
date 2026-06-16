@@ -77,7 +77,7 @@ export const CONFIG = {
     openrouter: {
         apiKey: process.env.OPENROUTER_API_KEY,
         baseURL: process.env.OPENROUTER_BASE_URL || "https://openrouter.ai/api/v1",
-        modelName: getProviderModel("openrouter", "x-ai/grok-4.1-fast"),
+        modelName: getProviderModel("openrouter", "x-ai/grok-4.3"),
         concurrency: 5,
         requestOptions: {
             reasoning: {

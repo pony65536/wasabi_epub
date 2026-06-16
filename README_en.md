@@ -75,7 +75,7 @@ PRIMARY_MODEL=qwen-plus
 
 FALLBACK_ON_CONTENT_POLICY=true
 FALLBACK_PROVIDER=openrouter
-FALLBACK_MODEL=x-ai/grok-4.1-fast
+FALLBACK_MODEL=x-ai/grok-4.3
 
 QWEN_API_KEY=your_qwen_api_key
 OPENROUTER_API_KEY=your_openrouter_api_key
