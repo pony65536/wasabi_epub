@@ -10,6 +10,9 @@ from services.pdf_strip_impl import (
     StripTextStats,
     strip_text_from_pdf as _strip_text_from_pdf,
 )
+from services.pdf_validate_impl import (
+    validate_translated_pdf as _validate_translated_pdf,
+)
 
 
 def extract_pdf_blocks(
@@ -34,3 +37,17 @@ def fill_translated_pdf(
     output_pdf: str,
 ) -> None:
     _fill_pdf_preserving_graphics(input_pdf, translated_json, output_pdf)
+
+
+def validate_pdf_output(
+    input_pdf: str,
+    translated_json: str,
+    output_pdf: str,
+    validation_json: str,
+) -> dict:
+    return _validate_translated_pdf(
+        input_pdf,
+        translated_json,
+        output_pdf,
+        validation_json,
+    )

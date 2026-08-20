@@ -2,11 +2,20 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import statistics
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from domain import common, layout, preservation
+
+
+COMPOSITE_MATH_FONT_REGEX = re.compile(r"(?:cmmi|cmsy|cmex|msam|msbm|stix)", flags=re.IGNORECASE)
+
+
+def _docling_enabled() -> bool:
+    value = str(os.environ.get("WASABI_DOCLING_ENABLED", "") or "").strip().lower()
+    return value in {"1", "true", "yes", "on"}
 
 
 def _identity_matrix() -> Tuple[float, float, float, float, float, float]:
@@ -78,6 +87,368 @@ def _stream_objgen(stream_obj: Any) -> Optional[Tuple[int, int]]:
 
 def _normalize_text_signature(value: str) -> str:
     return "".join(ch for ch in str(value or "").upper() if ch.isalnum()).strip()
+
+
+def _promote_table_headers(page_blocks: List[Dict[str, Any]], page_width: float) -> None:
+    table_blocks = [
+        block
+        for block in page_blocks
+        if str(block.get("blockType") or "") == "table_body"
+    ]
+    if not table_blocks:
+        return
+
+    for block in page_blocks:
+        if str(block.get("blockType") or "") != "body":
+            continue
+        if block.get("preserveOriginal"):
+            continue
+
+        bbox = block.get("bbox") or []
+        if len(bbox) != 4:
+            continue
+        x0, y0, x1, y1 = [float(v) for v in bbox]
+        width = max(x1 - x0, 0.0)
+        height = max(y1 - y0, 0.0)
+        font_size = float(block.get("fontSize") or 0.0)
+        layout_lines = block.get("layoutLines") or []
+        if len(layout_lines) < 4:
+            continue
+        if width < max(page_width * 0.45, 160.0):
+            continue
+        if height > max(font_size * 1.35, 12.0):
+            continue
+
+        line_tops: List[float] = []
+        valid_same_band = True
+        for line in layout_lines:
+            line_bbox = line.get("bbox") or []
+            if len(line_bbox) != 4:
+                valid_same_band = False
+                break
+            line_tops.append(float(line_bbox[1]))
+        if not valid_same_band or not line_tops:
+            continue
+        if max(line_tops) - min(line_tops) > max(font_size * 0.35, 3.0):
+            continue
+
+        adjacent_to_known_table = False
+        for table_block in table_blocks:
+            table_bbox = table_block.get("bbox") or []
+            if len(table_bbox) != 4:
+                continue
+            tx0, ty0, tx1, ty1 = [float(v) for v in table_bbox]
+            horizontal_overlap = max(0.0, min(x1, tx1) - max(x0, tx0))
+            overlap_ratio = horizontal_overlap / max(min(width, max(tx1 - tx0, 1.0)), 1.0)
+            vertical_gap = ty0 - y1
+            if overlap_ratio < 0.55:
+                continue
+            if vertical_gap < -2.0 or vertical_gap > max(font_size * 2.5, 18.0):
+                continue
+            adjacent_to_known_table = True
+            break
+        if not adjacent_to_known_table:
+            continue
+
+        normalized_text = common.normalize_text(str(block.get("text") or ""))
+        token_score = 0
+        if re.search(r"\b(?:method|type|search|held-?out|avg\.?|tokens?|acc\.?)\b", normalized_text, flags=re.IGNORECASE):
+            token_score += 1
+        if re.search(r"\([^()]{2,24}\)", normalized_text):
+            token_score += 1
+        if re.search(r"(?:↑|↓|\bacc\.?\b|\btokens?\b)", normalized_text, flags=re.IGNORECASE):
+            token_score += 1
+        if token_score <= 0:
+            continue
+
+        block["blockType"] = "table_header"
+        block["preserveOriginal"] = True
+        block["role"] = "preserved"
+        block["preserveReason"] = "table_header"
+
+
+def _looks_like_small_superscript_tick_label(block: Dict[str, Any]) -> bool:
+    if block.get("preserveOriginal"):
+        return False
+    if not bool(block.get("hasSuperscriptLike")):
+        return False
+    if str(block.get("blockType") or "") not in {"heading", "metadata", "body"}:
+        return False
+
+    bbox = block.get("bbox") or []
+    if len(bbox) != 4:
+        return False
+    x0, y0, x1, y1 = [float(v) for v in bbox]
+    width = max(x1 - x0, 0.0)
+    height = max(y1 - y0, 0.0)
+    font_size = float(block.get("fontSize") or 0.0)
+    if width < 24.0 or width > 190.0:
+        return False
+    if height > max(font_size * 1.15, 10.0):
+        return False
+
+    layout_lines = block.get("layoutLines") or []
+    if len(layout_lines) < 2 or len(layout_lines) > 6:
+        return False
+
+    matched_lines = 0
+    for line in layout_lines:
+        items = [item for item in (line.get("items") or []) if str(item.get("type") or "") in {"text", "formula"}]
+        if len(items) == 1:
+            lone_text = common.normalize_text(str(items[0].get("text") or ""))
+            if re.fullmatch(r"\d+(?:\.\d+)?", lone_text):
+                continue
+            return False
+
+        if len(items) != 2:
+            return False
+
+        first_text = common.normalize_text(str(items[0].get("text") or ""))
+        second_text = common.normalize_text(str(items[1].get("text") or ""))
+        first_type = str(items[0].get("type") or "")
+
+        base_like = (
+            re.fullmatch(r"\d{1,2}", first_text)
+            or re.fullmatch(r"\d+\s*[×xX]\s*10", first_text)
+        )
+        superscript_like = re.fullmatch(r"[\d+\-−⁻⁺]+", second_text)
+        if not base_like or not superscript_like:
+            return False
+        if first_type not in {"text", "formula"}:
+            return False
+
+        is_superscript = bool(items[1].get("isSuperscriptLike")) or bool(int(items[1].get("flags", 0)) & 1)
+        if not is_superscript:
+            return False
+        matched_lines += 1
+
+    return matched_lines >= 2
+
+
+def _promote_small_superscript_tick_labels(page_blocks: List[Dict[str, Any]]) -> None:
+    for block in page_blocks:
+        if not _looks_like_small_superscript_tick_label(block):
+            continue
+        block["blockType"] = "other"
+        block["preserveOriginal"] = True
+        block["role"] = "preserved"
+        block["preserveReason"] = "figure_tick_label"
+
+
+def _looks_like_monospace_parameter_block(block: Dict[str, Any]) -> bool:
+    if block.get("preserveOriginal"):
+        return False
+    if str(block.get("blockType") or "") not in {"body", "metadata"}:
+        return False
+
+    text = str(block.get("text") or "")
+    normalized = common.normalize_text(text)
+    if len(normalized) < 32:
+        return False
+
+    layout_lines = block.get("layoutLines") or []
+    if not layout_lines:
+        return False
+
+    text_items = []
+    for line in layout_lines:
+        for item in (line.get("items") or []):
+            if str(item.get("type") or "") in {"text", "formula"}:
+                text_items.append(item)
+    if not text_items:
+        return False
+
+    monospace_ratio = (
+        sum(1 for item in text_items if bool(item.get("isMonospaceLike"))) / max(len(text_items), 1)
+    )
+    if monospace_ratio < 0.75 and str(block.get("styleFamilyClass") or "") != "mono":
+        return False
+
+    assignment_count = len(
+        re.findall(r"\b[A-Za-z_][A-Za-z0-9_.]*\s*=\s*", text)
+    )
+    if assignment_count < 1:
+        return False
+
+    code_signal_count = 0
+    if assignment_count >= 2:
+        code_signal_count += 1
+    if re.search(r"\b(?:max|min|round|len|sum)\s*\(", text):
+        code_signal_count += 1
+    if "self." in text or "_MAX_" in text:
+        code_signal_count += 1
+    if common.is_formula_heavy_text(text):
+        code_signal_count += 1
+    if len(layout_lines) >= 3:
+        code_signal_count += 1
+
+    return code_signal_count >= 2
+
+
+def _promote_monospace_parameter_blocks(page_blocks: List[Dict[str, Any]]) -> None:
+    for block in page_blocks:
+        if not _looks_like_monospace_parameter_block(block):
+            continue
+        block["blockType"] = "code"
+        block["preserveOriginal"] = True
+        block["role"] = "preserved"
+        block["preserveReason"] = "code_block"
+
+
+def _bbox_width(bbox: List[float]) -> float:
+    if len(bbox) != 4:
+        return 0.0
+    return max(float(bbox[2]) - float(bbox[0]), 0.0)
+
+
+def _bbox_height(bbox: List[float]) -> float:
+    if len(bbox) != 4:
+        return 0.0
+    return max(float(bbox[3]) - float(bbox[1]), 0.0)
+
+
+def _horizontal_overlap(left_bbox: List[float], right_bbox: List[float]) -> float:
+    if len(left_bbox) != 4 or len(right_bbox) != 4:
+        return 0.0
+    return max(0.0, min(float(left_bbox[2]), float(right_bbox[2])) - max(float(left_bbox[0]), float(right_bbox[0])))
+
+
+def _union_bbox(left_bbox: List[float], right_bbox: List[float]) -> Optional[List[float]]:
+    if len(left_bbox) != 4 or len(right_bbox) != 4:
+        return None
+    return [
+        min(float(left_bbox[0]), float(right_bbox[0])),
+        min(float(left_bbox[1]), float(right_bbox[1])),
+        max(float(left_bbox[2]), float(right_bbox[2])),
+        max(float(left_bbox[3]), float(right_bbox[3])),
+    ]
+
+
+def _forms_compact_union(left_bbox: List[float], right_bbox: List[float]) -> bool:
+    if len(left_bbox) != 4 or len(right_bbox) != 4:
+        return False
+    union = _union_bbox(left_bbox, right_bbox)
+    if union is None:
+        return False
+    union_width = _bbox_width(union)
+    component_width = _bbox_width(left_bbox) + _bbox_width(right_bbox)
+    union_height = _bbox_height(union)
+    component_height = max(_bbox_height(left_bbox), _bbox_height(right_bbox))
+    return union_width <= component_width * 1.02 and union_height <= component_height * 1.2
+
+
+def _is_fake_bold_duplicate(left: Dict[str, Any], right: Dict[str, Any]) -> bool:
+    if str(left.get("text") or "") != str(right.get("text") or ""):
+        return False
+    if str(left.get("font") or "") != str(right.get("font") or ""):
+        return False
+    left_bbox = left.get("bbox") or []
+    right_bbox = right.get("bbox") or []
+    overlap = _horizontal_overlap(left_bbox, right_bbox)
+    return overlap >= max(_bbox_width(left_bbox), _bbox_width(right_bbox)) * 0.9
+
+
+def _is_normal_text_kerning(left: Dict[str, Any], right: Dict[str, Any]) -> bool:
+    left_text = common.normalize_text(str(left.get("text") or ""))
+    right_text = common.normalize_text(str(right.get("text") or ""))
+    return bool(re.fullmatch(r"[A-Za-z0-9]+", left_text) and re.fullmatch(r"[A-Za-z0-9]+", right_text))
+
+
+def _is_math_or_symbol_font(item: Dict[str, Any]) -> bool:
+    return bool(COMPOSITE_MATH_FONT_REGEX.search(str(item.get("font") or "")))
+
+
+def _build_composite_symbol_candidate(left: Dict[str, Any], right: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    left_bbox = left.get("bbox") or []
+    right_bbox = right.get("bbox") or []
+    if len(left_bbox) != 4 or len(right_bbox) != 4:
+        return None
+    if not (_is_math_or_symbol_font(left) and _is_math_or_symbol_font(right)):
+        return None
+    if _is_fake_bold_duplicate(left, right) or _is_normal_text_kerning(left, right):
+        return None
+
+    overlap = _horizontal_overlap(left_bbox, right_bbox)
+    narrow_width = min(_bbox_width(left_bbox), _bbox_width(right_bbox))
+    overlap_ratio = overlap / max(narrow_width, 1e-6)
+    if overlap_ratio < 0.45:
+        return None
+    if not _forms_compact_union(left_bbox, right_bbox):
+        return None
+
+    raw_text = f"{str(left.get('text') or '')}{str(right.get('text') or '')}"
+    if not re.search(r"[→←↔↦⇢]", raw_text):
+        return None
+
+    return {
+        "type": "composite_math_symbol",
+        "rawText": raw_text,
+        "semanticText": None,
+        "confidence": "high",
+        "renderPolicy": "preserve_visual",
+        "overlapRatio": overlap_ratio,
+        "glyphs": [
+            {
+                "text": str(left.get("text") or ""),
+                "font": str(left.get("font") or ""),
+                "bbox": [float(v) for v in left_bbox],
+            },
+            {
+                "text": str(right.get("text") or ""),
+                "font": str(right.get("font") or ""),
+                "bbox": [float(v) for v in right_bbox],
+            },
+        ],
+    }
+
+
+def _looks_like_composite_symbol_candidate_block(block: Dict[str, Any]) -> bool:
+    if block.get("preserveOriginal"):
+        return False
+    if str(block.get("blockType") or "") not in {"metadata", "body"}:
+        return False
+
+    bbox = block.get("bbox") or []
+    if len(bbox) != 4:
+        return False
+    width = _bbox_width(bbox)
+    height = _bbox_height(bbox)
+    if width > 20.0 or height < 10.0:
+        return False
+
+    layout_lines = block.get("layoutLines") or []
+    if len(layout_lines) < 2:
+        return False
+
+    candidates: List[Dict[str, Any]] = []
+    for line in layout_lines:
+        items = [
+            item
+            for item in (line.get("items") or [])
+            if common.normalize_text(str(item.get("text") or ""))
+        ]
+        if len(items) < 2:
+            continue
+        if any(str(item.get("type") or "") != "formula" for item in items):
+            return False
+        line_candidate = _build_composite_symbol_candidate(items[0], items[1])
+        if line_candidate is None:
+            return False
+        candidates.append(line_candidate)
+    if len(candidates) < 2:
+        return False
+    block["compositeSymbolCandidates"] = candidates
+    return True
+
+
+def _promote_composite_symbol_candidate_blocks(page_blocks: List[Dict[str, Any]]) -> None:
+    for block in page_blocks:
+        if not _looks_like_composite_symbol_candidate_block(block):
+            continue
+        block["blockType"] = "other"
+        block["preserveOriginal"] = True
+        block["role"] = "preserved"
+        block["preserveReason"] = "composite_math_symbol"
 
 
 def _extract_text_object_text(instructions: List[Any]) -> str:
@@ -417,11 +788,25 @@ def extract_blocks(
         page_index + 1: float(doc[page_index].rect.height)
         for page_index in range(len(doc))
     }
-    docling_items, docling_summary = layout.extract_docling_layout_items(
-        input_pdf,
-        page_heights,
-        pages=pages,
-    )
+    if _docling_enabled():
+        docling_items, docling_summary = layout.extract_docling_layout_items(
+            input_pdf,
+            page_heights,
+            pages=pages,
+        )
+    else:
+        docling_items, docling_summary = (
+            [],
+            {
+                "enabled": False,
+                "status": "disabled",
+                "error": "docling_disabled",
+                "elapsedMs": 0,
+                "items": 0,
+                "batchPages": 0,
+                "batches": 0,
+            },
+        )
     docling_items_by_page: Dict[int, List[Dict[str, Any]]] = {}
     for item in docling_items:
         docling_items_by_page.setdefault(int(item["page"]), []).append(item)
@@ -710,6 +1095,13 @@ def extract_blocks(
                     block["role"] = "preserved"
                     block["preserveReason"] = "formula_heavy"
                     block["blockType"] = "formula_display"
+
+        _promote_small_superscript_tick_labels(page_blocks)
+        _promote_monospace_parameter_blocks(page_blocks)
+        _promote_composite_symbol_candidate_blocks(page_blocks)
+        _promote_table_headers(page_blocks, page_width)
+
+        for block in page_blocks:
             if block.get("preserveOriginal"):
                 matched_xobjects = [
                     anchor

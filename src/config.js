@@ -9,6 +9,12 @@ const envFlag = (value, fallback = false) => {
     return /^(1|true|yes|on)$/i.test(String(value).trim());
 };
 
+const envInt = (value, fallback) => {
+    if (value == null || value === "") return fallback;
+    const parsed = Number.parseInt(String(value).trim(), 10);
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+};
+
 const getProviderModel = (providerName, defaultModel) => {
     const upper = providerName.toUpperCase();
     const directEnvModel = env[`${upper}_MODEL`];
@@ -23,6 +29,14 @@ const getProviderModel = (providerName, defaultModel) => {
     }
 
     return defaultModel;
+};
+
+const getProviderTimeoutMs = (providerName, defaultTimeoutMs = 90000) => {
+    const upper = providerName.toUpperCase();
+    return envInt(
+        env[`${upper}_TIMEOUT_MS`] || env.PROVIDER_TIMEOUT_MS,
+        defaultTimeoutMs,
+    );
 };
 
 export const CURRENT_PROVIDER = normalizeProvider(
@@ -59,6 +73,7 @@ export const CONFIG = {
         apiKey: process.env.GEMINI_API_KEY,
         modelName: getProviderModel("gemini", "gemini-2.5-pro"),
         concurrency: 5,
+        timeoutMs: getProviderTimeoutMs("gemini"),
     },
     qwen: {
         apiKey: process.env.QWEN_API_KEY,
@@ -67,18 +82,21 @@ export const CONFIG = {
             "https://dashscope.aliyuncs.com/compatible-mode/v1",
         modelName: getProviderModel("qwen", "qwen-plus"),
         concurrency: 5,
+        timeoutMs: getProviderTimeoutMs("qwen"),
     },
     mimo: {
         apiKey: process.env.MIMO_API_KEY,
         baseURL: process.env.MIMO_BASE_URL || "https://api.xiaomimimo.com/v1",
         modelName: getProviderModel("mimo", "mimo-v2-pro"),
         concurrency: 5,
+        timeoutMs: getProviderTimeoutMs("mimo"),
     },
     openrouter: {
         apiKey: process.env.OPENROUTER_API_KEY,
         baseURL: process.env.OPENROUTER_BASE_URL || "https://openrouter.ai/api/v1",
         modelName: getProviderModel("openrouter", "x-ai/grok-4.3"),
         concurrency: 5,
+        timeoutMs: getProviderTimeoutMs("openrouter"),
         requestOptions: {
             reasoning: {
                 enabled: envFlag(process.env.OPENROUTER_REASONING_ENABLED, true),

@@ -65,6 +65,25 @@ export const fillPdfFromJson = async (
 ) => {
     fs.mkdirSync(path.dirname(outputPath), { recursive: true });
     const args = ["fill", inputPath, translatedJsonPath, outputPath];
-    await runPython(args, logger, { streamOutputToTerminal: false });
+    await runPython(args, logger, { streamOutputToTerminal: true });
     return outputPath;
+};
+
+export const validatePdfOutput = async (
+    inputPath,
+    translatedJsonPath,
+    outputPath,
+    validationPath,
+    logger,
+) => {
+    fs.mkdirSync(path.dirname(validationPath), { recursive: true });
+    const args = [
+        "validate",
+        inputPath,
+        translatedJsonPath,
+        outputPath,
+        validationPath,
+    ];
+    await runPython(args, logger, { streamOutputToTerminal: true });
+    return JSON.parse(fs.readFileSync(validationPath, "utf8"));
 };

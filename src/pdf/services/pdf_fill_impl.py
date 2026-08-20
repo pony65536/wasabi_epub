@@ -1,212 +1,25 @@
 from __future__ import annotations
 
 import json
-import tempfile
+import re
 import time
 from difflib import SequenceMatcher
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
 
-from domain import common, core, preservation, rendering
-from services.pdf_strip_impl import strip_text_from_pdf
+from domain import common, rendering
+from domain.core import is_short_byline_metadata_block, is_translation_meta_note
 
 
+BACKGROUND_RENDER_ZOOM = 2.0
 BRAND_LABEL_URL = "https://github.com/pony65536/wasabi_epub"
 BRAND_LOGO_PATH = Path(__file__).resolve().parents[1] / "app" / "assets" / "wasabi.png"
-
-
-def _to_pdf_coordinate_regions(
-    regions_by_page: List[List[List[float]]],
-    pages_blocks: List[List[Dict[str, Any]]],
-) -> List[List[List[float]]]:
-    pdf_regions_by_page: List[List[List[float]]] = []
-    for page_index, regions in enumerate(regions_by_page):
-        page_blocks = pages_blocks[page_index] if page_index < len(pages_blocks) else []
-        page_height = max(
-            float((page_blocks[0].get("pageHeight") if page_blocks else 0.0) or 0.0),
-            1.0,
-        )
-        converted: List[List[float]] = []
-        for region in regions:
-            if len(region) != 4:
-                continue
-            x0, y0, x1, y1 = [float(v) for v in region]
-            converted.append([x0, page_height - y1, x1, page_height - y0])
-        pdf_regions_by_page.append(converted)
-    return pdf_regions_by_page
-
-
-def _fitz_regions_map_to_pdf_coordinate_regions(
-    regions_by_page: Dict[int, List[List[float]]],
-    source_doc,
-) -> List[List[List[float]]]:
-    pdf_regions_by_page: List[List[List[float]]] = []
-    for page_index in range(len(source_doc)):
-        page_height = max(float(source_doc[page_index].rect.height), 1.0)
-        converted: List[List[float]] = []
-        for region in regions_by_page.get(page_index, []):
-            if len(region) != 4:
-                continue
-            x0, y0, x1, y1 = [float(v) for v in region]
-            converted.append([x0, page_height - y1, x1, page_height - y0])
-        pdf_regions_by_page.append(converted)
-    return pdf_regions_by_page
-
-
-def _preserved_text_signatures_by_page(
-    pages_blocks: List[List[Dict[str, Any]]],
-) -> List[set[str]]:
-    import re
-
-    def signature(value: str) -> str:
-        return re.sub(r"[^A-Za-z0-9]+", "", str(value or "").upper()).strip()
-
-    signatures_by_page: List[set[str]] = []
-    for page_blocks in pages_blocks:
-        signatures: set[str] = set()
-        for block in page_blocks:
-            if str(block.get("preserveReason") or "") != "peripheral_repeat":
-                continue
-            normalized = signature(str(block.get("text") or ""))
-            if normalized:
-                signatures.add(normalized)
-        signatures_by_page.append(signatures)
-    return signatures_by_page
-
-
-def _preserved_xobject_names_by_page(
-    pages_blocks: List[List[Dict[str, Any]]],
-) -> List[set[str]]:
-    names_by_page: List[set[str]] = []
-    for page_blocks in pages_blocks:
-        names: set[str] = set()
-        for block in page_blocks:
-            anchors = block.get("preserveAnchors") or {}
-            for anchor in anchors.get("xobjects", []) or []:
-                name = str(anchor.get("name") or "").strip()
-                if name:
-                    names.add(name)
-        names_by_page.append(names)
-    return names_by_page
-
-
-def _preserved_text_object_refs_by_page(
-    pages_blocks: List[List[Dict[str, Any]]],
-) -> List[Dict[tuple[int, int], set[int]]]:
-    refs_by_page: List[Dict[tuple[int, int], set[int]]] = []
-    for page_blocks in pages_blocks:
-        page_refs: Dict[tuple[int, int], set[int]] = {}
-        for block in page_blocks:
-            anchors = block.get("preserveAnchors") or {}
-            for anchor in anchors.get("textObjects", []) or []:
-                stream_objgen = anchor.get("streamObjgen") or []
-                if not isinstance(stream_objgen, (list, tuple)) or len(stream_objgen) != 2:
-                    continue
-                try:
-                    stream_key = (int(stream_objgen[0]), int(stream_objgen[1]))
-                    text_object_index = int(anchor.get("textObjectIndex"))
-                except Exception:
-                    continue
-                page_refs.setdefault(stream_key, set()).add(text_object_index)
-        refs_by_page.append(page_refs)
-    return refs_by_page
 
 
 def _fallback_output_path(output_pdf: str) -> str:
     target = Path(output_pdf)
     timestamp = time.strftime("%Y%m%d_%H%M%S")
     return str(target.with_name(f"{target.stem}_{timestamp}{target.suffix}"))
-
-
-def _merge_pdf_region_lists(
-    first: List[List[List[float]]],
-    second: List[List[List[float]]],
-) -> List[List[List[float]]]:
-    total = max(len(first), len(second))
-    merged: List[List[List[float]]] = []
-    for page_index in range(total):
-        page_regions: List[List[float]] = []
-        if page_index < len(first):
-            page_regions.extend(first[page_index])
-        if page_index < len(second):
-            page_regions.extend(second[page_index])
-        merged.append(page_regions)
-    return merged
-
-
-def _build_preserved_decorative_picture_regions_by_page(
-    pages_blocks: List[List[Dict[str, Any]]],
-) -> List[List[List[float]]]:
-    regions_by_page: List[List[List[float]]] = []
-    for page_blocks in pages_blocks:
-        page_regions: List[List[float]] = []
-        for block in page_blocks:
-            if not block.get("preserveOriginal"):
-                continue
-            if str(block.get("preserveReason") or "") != "picture_region":
-                continue
-            bbox = block.get("bbox") or []
-            if len(bbox) != 4:
-                continue
-            page_width = max(float(block.get("pageWidth") or 1.0), 1.0)
-            page_height = max(float(block.get("pageHeight") or 1.0), 1.0)
-            x0, y0, x1, y1 = [float(v) for v in bbox]
-            width = max(x1 - x0, 0.0)
-            height = max(y1 - y0, 0.0)
-            area_ratio = (width * height) / max(page_width * page_height, 1.0)
-            hits_top_band = y1 <= page_height * 0.08
-            hits_bottom_band = y0 >= page_height * 0.92
-            hits_side_band = x1 <= page_width * 0.18 or x0 >= page_width * 0.82
-            is_small_decorative = area_ratio <= 0.02
-            if (hits_top_band or hits_bottom_band or hits_side_band) and is_small_decorative:
-                page_regions.append(core.bbox_with_margin([x0, y0, x1, y1], 3.0))
-        regions_by_page.append(page_regions)
-    return regions_by_page
-
-
-def _bbox_hits_any_region(
-    bbox: List[float] | tuple[float, float, float, float],
-    regions: List[List[float]],
-    *,
-    min_overlap_ratio: float = 0.6,
-) -> bool:
-    if len(bbox) != 4:
-        return False
-    for region in regions:
-        if len(region) != 4:
-            continue
-        if common.bbox_overlap_ratio(list(bbox), region) >= min_overlap_ratio:
-            return True
-    return False
-
-
-def _page_has_preserved_text_regions(
-    page_index: int,
-    preserved_text_regions_by_page: List[List[List[float]]],
-) -> bool:
-    return (
-        0 <= page_index < len(preserved_text_regions_by_page)
-        and bool(preserved_text_regions_by_page[page_index])
-    )
-
-
-def _preserve_mode_for_block(
-    block: Dict[str, Any],
-    decorative_regions_by_page: List[List[List[float]]],
-) -> str:
-    if not block.get("preserveOriginal"):
-        return "pdf"
-    if str(block.get("preserveReason") or "") != "picture_region":
-        return "pdf"
-    page_index = max(int(block.get("page", 1)) - 1, 0)
-    decorative_regions = (
-        decorative_regions_by_page[page_index]
-        if 0 <= page_index < len(decorative_regions_by_page)
-        else []
-    )
-    if _bbox_hits_any_region(block.get("bbox") or [], decorative_regions):
-        return "pdf"
-    return "image"
 
 
 def _split_first_visible_character(text: str) -> tuple[str, str]:
@@ -427,6 +240,186 @@ def _write_brand_logo(page, source_page, fitz) -> None:
         pass
 
 
+def block_is_uncertain(block: Dict[str, Any]) -> bool:
+    if str(block.get("preserveReason") or "") == "translation_meta_note":
+        return True
+    if is_translation_meta_note(str(block.get("translationMetaNote") or "")):
+        return True
+    if block.get("preserveOriginal"):
+        return False
+    if str(block.get("doclingLabel") or "") == "picture":
+        return True
+    if str(block.get("doclingLabel") or "") == "table":
+        return True
+    if str(block.get("blockType") or "") == "table_body":
+        return True
+    translated = common.sanitize_translated_text(block.get("translatedText") or "")
+    if not translated:
+        return True
+    bbox = block.get("bbox") or []
+    return len(bbox) != 4
+
+
+def is_reference_block(block: Dict[str, Any]) -> bool:
+    block_type = str(block.get("blockType") or "").lower()
+    docling_label = str(block.get("doclingLabel") or "").lower()
+    preserve_reason = str(block.get("preserveReason") or "").lower()
+    text = str(block.get("text") or "").strip()
+    return (
+        block_type in {"reference_block", "reference", "bibliography"}
+        or docling_label == "reference"
+        or preserve_reason in {"reference_block", "reference_section"}
+        or re.match(r"^\[\d+\]\s+", text) is not None
+    )
+
+
+def is_compact_metadata_preserve_block(block: Dict[str, Any]) -> bool:
+    block_type = str(block.get("blockType") or "")
+    if block_type not in {"metadata", "page_header", "page_footer"}:
+        return False
+    if is_short_byline_metadata_block(block):
+        return True
+    bbox = block.get("bbox") or []
+    if len(bbox) != 4:
+        return False
+    height = max(float(bbox[3]) - float(bbox[1]), 0.0)
+    text = common.normalize_text(str(block.get("text") or ""))
+    translated = common.normalize_text(str(block.get("translatedText") or ""))
+    if not text or not translated:
+        return False
+    line_count = len(block.get("layoutLines") or [])
+    has_affiliation_markers = bool(
+        re.search(r"\b(?:UMD|UVA|WUSTL|UNC|Google|Meta)\b", text)
+        or re.search(r"(大学|谷歌|Meta)", translated)
+    )
+    return (
+        line_count <= 1
+        and height <= 12.5
+        and len(translated) > len(text)
+        and has_affiliation_markers
+    )
+
+
+def is_code_preserve_block(block: Dict[str, Any]) -> bool:
+    docling_label = str(block.get("doclingLabel") or "").lower()
+    block_type = str(block.get("blockType") or "").lower()
+    return docling_label == "code" or block_type in {"code", "formula_display"}
+
+
+def resolve_block_action(block: Dict[str, Any]) -> str:
+    render_policy = str(rendering.resolve_render_policy(block) or "")
+    if render_policy == "preserve_visual":
+        block["renderPolicy"] = render_policy
+        return "preserve"
+    if block.get("preserveOriginal"):
+        return "preserve"
+    if str(block.get("blockType") or "").lower() in {"formula_display", "table_header", "table_body"}:
+        return "preserve"
+    if is_reference_block(block):
+        return "preserve"
+    if is_code_preserve_block(block):
+        return "preserve"
+    if is_compact_metadata_preserve_block(block):
+        return "preserve"
+    if block_is_uncertain(block):
+        return "review"
+    return "replace"
+
+
+def _group_blocks_by_page(blocks: List[Dict[str, Any]]) -> Dict[int, List[Dict[str, Any]]]:
+    grouped: Dict[int, List[Dict[str, Any]]] = {}
+    for block in blocks:
+        page_number = max(int(block.get("page", 1)) - 1, 0)
+        grouped.setdefault(page_number, []).append(block)
+    return grouped
+
+
+def _expand_rect(rect, page_rect, margin: float):
+    x0 = max(float(page_rect.x0), float(rect.x0) - margin)
+    y0 = max(float(page_rect.y0), float(rect.y0) - margin)
+    x1 = min(float(page_rect.x1), float(rect.x1) + margin)
+    y1 = min(float(page_rect.y1), float(rect.y1) + margin)
+    return page_rect.__class__(x0, y0, x1, y1)
+
+
+def _collect_text_item_rects(block: Dict[str, Any], fitz) -> Tuple[List[Any], bool]:
+    rects: List[Any] = []
+    used_bbox_fallback = False
+    page_rect = fitz.Rect(
+        0.0,
+        0.0,
+        max(float(block.get("pageWidth") or 0.0), 1.0),
+        max(float(block.get("pageHeight") or 0.0), 1.0),
+    )
+
+    for line in block.get("layoutLines") or []:
+        line_rects = []
+        for item in line.get("items", []) or []:
+            if item.get("type") != "text":
+                continue
+            bbox = item.get("bbox") or []
+            if len(bbox) != 4:
+                continue
+            rect = fitz.Rect(*bbox)
+            if rect.is_empty or rect.is_infinite:
+                continue
+            line_rects.append(_expand_rect(rect, page_rect, 0.9))
+        if line_rects:
+            rects.extend(line_rects)
+            continue
+        line_bbox = line.get("bbox") or []
+        if len(line_bbox) == 4:
+            rect = fitz.Rect(*line_bbox)
+            if not rect.is_empty and not rect.is_infinite:
+                rects.append(_expand_rect(rect, page_rect, 0.9))
+
+    if rects:
+        return rects, used_bbox_fallback
+
+    bbox = block.get("bbox") or []
+    if len(bbox) == 4:
+        rect = fitz.Rect(*bbox)
+        if not rect.is_empty and not rect.is_infinite:
+            used_bbox_fallback = True
+            return [_expand_rect(rect, page_rect, 1.2)], used_bbox_fallback
+    return [], used_bbox_fallback
+
+
+def build_page_erase_plan(page_blocks: List[Dict[str, Any]], fitz) -> Tuple[List[Any], List[Dict[str, Any]]]:
+    erase_rects: List[Any] = []
+    warnings: List[Dict[str, Any]] = []
+    for block in page_blocks:
+        action = resolve_block_action(block)
+        block["action"] = action
+        if action != "replace":
+            continue
+        rects, used_bbox_fallback = _collect_text_item_rects(block, fitz)
+        erase_rects.extend(rects)
+        if used_bbox_fallback:
+            warnings.append(
+                {
+                    "type": "bbox_fallback",
+                    "page": int(block.get("page") or 0),
+                    "blockId": block.get("id"),
+                }
+            )
+    return erase_rects, warnings
+
+
+def remove_source_text_in_regions(page, erase_rects: List[Any], fitz) -> int:
+    annotation_count = 0
+    for rect in erase_rects:
+        page.add_redact_annot(rect, fill=False, cross_out=False)
+        annotation_count += 1
+    if annotation_count > 0:
+        page.apply_redactions(
+            images=fitz.PDF_REDACT_IMAGE_NONE,
+            graphics=fitz.PDF_REDACT_LINE_ART_NONE,
+            text=fitz.PDF_REDACT_TEXT_REMOVE,
+        )
+    return annotation_count
+
+
 def fill_pdf_preserving_graphics(
     input_pdf: str,
     translated_json: str,
@@ -439,278 +432,178 @@ def fill_pdf_preserving_graphics(
         f"PDF fill start: input={input_pdf} translated_json={translated_json} output={output_pdf}",
         flush=True,
     )
+
     payload = json.loads(Path(translated_json).read_text(encoding="utf-8"))
-    _apply_drop_cap_translation_splits(payload.get("blocks", []))
-    _suppress_redundant_prose_heading_tails(payload.get("blocks", []))
+    blocks = list(payload.get("blocks", []))
+    _apply_drop_cap_translation_splits(blocks)
+    _suppress_redundant_prose_heading_tails(blocks)
+    blocks_by_page = _group_blocks_by_page(blocks)
+
     written = 0
-    failed = 0
     preserved = 0
-    blocks_by_page: Dict[int, List[Dict[str, Any]]] = {}
-    for block in payload.get("blocks", []):
-        page_number = int(block.get("page", 0)) - 1
-        blocks_by_page.setdefault(page_number, []).append(block)
-    pages_blocks = [
-        blocks_by_page.get(page_index, [])
-        for page_index in range(max(blocks_by_page.keys(), default=-1) + 1)
-    ]
+    review = 0
+    failed = 0
 
     output_path = Path(output_pdf)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile(
-        prefix=f"wasabi_{output_path.stem}_stripped_",
-        suffix=".pdf",
-        delete=False,
-    ) as temp_file:
-        stripped_pdf_path = Path(temp_file.name)
+    print(f"PDF fill: opening source pdf {input_pdf}", flush=True)
+    output_doc = fitz.open(input_pdf)
+    print(f"PDF fill: source pdf opened pages={len(output_doc)}", flush=True)
 
     try:
-        strip_started = time.perf_counter()
-        print("PDF fill: strip_text_from_pdf start", flush=True)
-        source_doc = fitz.open(input_pdf)
-        preserved_peripheral_regions_map = preservation.build_preserved_peripheral_regions_by_page(
-            pages_blocks
-        )
-        preserved_peripheral_regions_by_page = [
-            preserved_peripheral_regions_map.get(page_index, [])
-            for page_index in range(len(pages_blocks))
-        ]
-        preserved_peripheral_regions_pdf_by_page = _to_pdf_coordinate_regions(
-            preserved_peripheral_regions_by_page,
-            pages_blocks,
-        )
-        preserved_decorative_picture_regions_by_page = _build_preserved_decorative_picture_regions_by_page(
-            pages_blocks
-        )
-        preserved_decorative_picture_regions_pdf_by_page = _to_pdf_coordinate_regions(
-            preserved_decorative_picture_regions_by_page,
-            pages_blocks,
-        )
-        running_header_regions_by_page = preservation.detect_running_header_label_regions(source_doc)
-        running_header_regions_pdf_by_page = _fitz_regions_map_to_pdf_coordinate_regions(
-            running_header_regions_by_page,
-            source_doc,
-        )
-        preserved_text_regions_by_page = _merge_pdf_region_lists(
-            preserved_peripheral_regions_pdf_by_page,
-            preserved_decorative_picture_regions_pdf_by_page,
-        )
-        preserved_text_regions_by_page = _merge_pdf_region_lists(
-            preserved_text_regions_by_page,
-            running_header_regions_pdf_by_page,
-        )
-        preserved_text_signatures_by_page = _preserved_text_signatures_by_page(
-            pages_blocks
-        )
-        preserved_text_object_refs_by_page = _preserved_text_object_refs_by_page(
-            pages_blocks
-        )
-        preserved_xobject_names_by_page = _preserved_xobject_names_by_page(
-            pages_blocks
-        )
-        strip_stats = strip_text_from_pdf(
-            input_pdf,
-            str(stripped_pdf_path),
-            preserve_risky_text=False,
-            preserve_unterminated_text=False,
-            preserve_text_regions_by_page=preserved_text_regions_by_page,
-            preserve_text_signatures_by_page=preserved_text_signatures_by_page,
-            preserve_text_object_refs_by_page=preserved_text_object_refs_by_page,
-            preserve_xobject_names_by_page=preserved_xobject_names_by_page,
-        )
-        print(
-            f"PDF fill: strip_text_from_pdf done pages={strip_stats.pages} "
-            f"streams={strip_stats.streams} removed_text_objects={strip_stats.removed_text_objects} "
-            f"retained_preserved_region_text_objects={strip_stats.retained_preserved_region_text_objects} "
-            f"retained_form_text_objects={strip_stats.retained_form_text_objects} "
-            f"elapsed={time.perf_counter() - strip_started:.2f}s",
-            flush=True,
-        )
-        doc = fitz.open(stripped_pdf_path)
-        try:
-            total_pages = len(doc)
-            for page_index, page in enumerate(doc):
-                page_started = time.perf_counter()
+        total_pages = len(output_doc)
+        print(f"PDF fill: entering page loop total_pages={total_pages}", flush=True)
+        for page_index in range(total_pages):
+            output_page = output_doc[page_index]
+            page_blocks = blocks_by_page.get(page_index, [])
+            page_started = time.perf_counter()
+            print(
+                f"PDF fill: page {page_index + 1}/{total_pages} start",
+                flush=True,
+            )
+
+            erase_rects, erase_warnings = build_page_erase_plan(page_blocks, fitz)
+            print(
+                f"PDF fill: page {page_index + 1}/{total_pages} erase plan "
+                f"rects={len(erase_rects)} warnings={len(erase_warnings)}",
+                flush=True,
+            )
+            print(
+                f"PDF fill: page {page_index + 1}/{total_pages} redaction start",
+                flush=True,
+            )
+            redaction_count = remove_source_text_in_regions(output_page, erase_rects, fitz)
+            print(
+                f"PDF fill: page {page_index + 1}/{total_pages} redaction done "
+                f"annotations={redaction_count}",
+                flush=True,
+            )
+
+            for warning in erase_warnings:
                 print(
-                    f"PDF fill: page {page_index + 1}/{total_pages} start",
+                    f"WARN: erase mask fallback for block {warning.get('blockId')} on page {warning.get('page')}",
                     flush=True,
                 )
-                if _page_has_preserved_text_regions(page_index, preserved_text_regions_by_page):
+
+            for block in page_blocks:
+                action = resolve_block_action(block)
+                block["action"] = action
+                print(
+                    f"PDF fill: page {page_index + 1}/{total_pages} block {block.get('id')} start "
+                    f"(action={action} role={block.get('role')})",
+                    flush=True,
+                )
+                if action == "preserve":
+                    preserved += 1
+                    continue
+                if action == "review":
+                    review += 1
                     print(
-                        f"PDF fill: page {page_index + 1}/{total_pages} wrap_contents "
-                        f"due to preserved text regions",
+                        f"WARN: block {block.get('id')} on page {block.get('page')} marked review; "
+                        f"keeping source background only",
                         flush=True,
                     )
-                    try:
-                        page.wrap_contents()
-                    except Exception:
-                        pass
-                else:
-                    try:
-                        page.clean_contents()
-                    except Exception:
-                        pass
-                for block in blocks_by_page.get(page_index, []):
-                    print(
-                        f"PDF fill: page {page_index + 1}/{total_pages} block {block.get('id')} start "
-                        f"(role={block.get('role')} preserve={bool(block.get('preserveOriginal'))})",
-                        flush=True,
-                    )
-                    if str(block.get("preserveReason") or "") == "peripheral_repeat":
-                        preserved += 1
-                        print(
-                            f"PDF fill: page {page_index + 1}/{total_pages} block {block.get('id')} deferred "
-                            f"to peripheral region restore",
-                            flush=True,
-                        )
-                        continue
-                    if (
-                        block.get("preserveOriginal")
-                        and str(block.get("preserveReason") or "") == "picture_region"
-                        and _bbox_hits_any_region(
-                            block.get("bbox") or [],
-                            (
-                                running_header_regions_by_page.get(page_index, [])
-                                + (
-                                    preserved_decorative_picture_regions_by_page[page_index]
-                                    if page_index < len(preserved_decorative_picture_regions_by_page)
-                                    else []
-                                )
-                            ),
-                        )
-                    ):
-                        preserved += 1
-                        print(
-                            f"PDF fill: page {page_index + 1}/{total_pages} block {block.get('id')} deferred "
-                            f"to strip-preserved decorative region",
-                            flush=True,
-                        )
-                        continue
-                    if str(block.get("preserveStrategy") or "") == "pdf_object":
-                        preserved += 1
-                        print(
-                            f"PDF fill: page {page_index + 1}/{total_pages} block {block.get('id')} deferred "
-                            f"to object-preserved source text",
-                            flush=True,
-                        )
-                        continue
-                    if block.get("preserveReason") == "translation_meta_note":
-                        note_preview = common.normalize_text(block.get("translationMetaNote") or "")[:120]
-                        print(
-                            f"WARN: preserving source for {block.get('id')} on page {block.get('page')} "
-                            f"due to translator meta note: {note_preview!r}",
-                            flush=True,
-                        )
-                    preserve_mode = _preserve_mode_for_block(
-                        block,
-                        preserved_decorative_picture_regions_by_page,
-                    )
+                    continue
+
+                try:
                     result = rendering.write_translated_block(
-                        page,
+                        output_page,
                         block,
                         fitz,
-                        source_doc=source_doc,
-                        preserve_mode=preserve_mode,
-                        erase_mode="none",
                         debug_visuals=False,
                     )
-                    if result is None:
-                        print(
-                            f"PDF fill: page {page_index + 1}/{total_pages} block {block.get('id')} skipped",
-                            flush=True,
-                        )
-                        continue
-                    if result:
-                        if block.get("preserveOriginal"):
-                            preserved += 1
-                        else:
-                            written += 1
-                        print(
-                            f"PDF fill: page {page_index + 1}/{total_pages} block {block.get('id')} done "
-                            f"(written={written} preserved={preserved} failed={failed})",
-                            flush=True,
-                        )
-                    else:
-                        failed += 1
-                        preview_source = (
-                            block.get("text")
-                            if block.get("preserveOriginal")
-                            else common.sanitize_translated_text(block.get("translatedText") or "")
-                        )
-                        preview = common.normalize_text(preview_source or "")[:80]
-                        print(
-                            f"WARN: write failed for {block.get('id')} on page {block.get('page')} "
-                            f"bbox={block.get('bbox')} text={preview!r}",
-                            flush=True,
-                        )
-                if page_index == 0:
-                    _write_brand_logo(page, source_doc[page_index], fitz)
-                print(
-                    f"PDF fill: page {page_index + 1}/{total_pages} done "
-                    f"(written={written} preserved={preserved} failed={failed}) "
-                    f"elapsed={time.perf_counter() - page_started:.2f}s",
-                    flush=True,
-                )
+                except Exception as exc:
+                    raise RuntimeError(
+                        "write_translated_block raised an exception: "
+                        f"block={block.get('id')} "
+                        f"page={page_index + 1} "
+                        f"bbox={block.get('bbox')} "
+                        f"blockType={block.get('blockType')} "
+                        f"doclingLabel={block.get('doclingLabel')} "
+                        f"sourceLength={len(str(block.get('text') or ''))} "
+                        f"translatedLength={len(str(block.get('translatedText') or ''))}"
+                    ) from exc
+                if result:
+                    written += 1
+                elif result is None:
+                    review += 1
+                    block["action"] = "review"
+                    print(
+                        f"WARN: block {block.get('id')} on page {block.get('page')} produced no renderable text; "
+                        f"downgrading to review",
+                        flush=True,
+                    )
+                else:
+                    failed += 1
+                    raise RuntimeError(
+                        "write_translated_block could not fit text: "
+                        f"block={block.get('id')} "
+                        f"page={page_index + 1} "
+                        f"bbox={block.get('bbox')} "
+                        f"blockType={block.get('blockType')} "
+                        f"doclingLabel={block.get('doclingLabel')} "
+                        f"sourceLength={len(str(block.get('text') or ''))} "
+                        f"translatedLength={len(str(block.get('translatedText') or ''))}"
+                    )
 
-            subset_started = time.perf_counter()
-            print("PDF fill: subset_fonts start", flush=True)
-            doc.subset_fonts()
+            if page_index == 0:
+                _write_brand_logo(output_page, output_page, fitz)
+
             print(
-                f"PDF fill: subset_fonts done elapsed={time.perf_counter() - subset_started:.2f}s",
+                f"PDF fill: page {page_index + 1}/{total_pages} done "
+                f"(written={written} preserved={preserved} review={review} failed={failed} redactions={redaction_count}) "
+                f"elapsed={time.perf_counter() - page_started:.2f}s",
                 flush=True,
             )
-            save_started = time.perf_counter()
-            print("PDF fill: save start", flush=True)
-            final_output_pdf = output_pdf
-            try:
-                doc.save(
-                    final_output_pdf,
-                    garbage=4,
-                    deflate=True,
-                    deflate_images=True,
-                    deflate_fonts=True,
-                    use_objstms=1,
-                )
-            except Exception as exc:
-                message = str(exc or "")
-                if "cannot remove file" not in message.lower() and "permission denied" not in message.lower():
-                    raise
-                fallback_output_pdf = _fallback_output_path(output_pdf)
-                print(
-                    f"WARN: target output is locked, saving to fallback path: {fallback_output_pdf}",
-                    flush=True,
-                )
-                final_output_pdf = fallback_output_pdf
-                doc.save(
-                    final_output_pdf,
-                    garbage=4,
-                    deflate=True,
-                    deflate_images=True,
-                    deflate_fonts=True,
-                    use_objstms=1,
-                )
-            print(
-                f"PDF fill: save done path={final_output_pdf} elapsed={time.perf_counter() - save_started:.2f}s",
-                flush=True,
-            )
-        finally:
-            source_doc.close()
-            doc.close()
-    finally:
+
+        subset_started = time.perf_counter()
+        print("PDF fill: subset_fonts start", flush=True)
+        output_doc.subset_fonts()
+        print(
+            f"PDF fill: subset_fonts done elapsed={time.perf_counter() - subset_started:.2f}s",
+            flush=True,
+        )
+
+        save_started = time.perf_counter()
+        print("PDF fill: save start", flush=True)
+        final_output_pdf = output_pdf
         try:
-            stripped_pdf_path.unlink(missing_ok=True)
-        except Exception:
-            pass
+            output_doc.save(
+                final_output_pdf,
+                garbage=4,
+                deflate=True,
+                deflate_images=True,
+                deflate_fonts=True,
+                use_objstms=1,
+            )
+        except Exception as exc:
+            message = str(exc or "")
+            if "cannot remove file" not in message.lower() and "permission denied" not in message.lower():
+                raise
+            fallback_output_pdf = _fallback_output_path(output_pdf)
+            print(
+                f"WARN: target output is locked, saving to fallback path: {fallback_output_pdf}",
+                flush=True,
+            )
+            final_output_pdf = fallback_output_pdf
+            output_doc.save(
+                final_output_pdf,
+                garbage=4,
+                deflate=True,
+                deflate_images=True,
+                deflate_fonts=True,
+                use_objstms=1,
+            )
+        print(
+            f"PDF fill: save done path={final_output_pdf} elapsed={time.perf_counter() - save_started:.2f}s",
+            flush=True,
+        )
+    finally:
+        output_doc.close()
 
     print(
-        f"Filled PDF preserving original graphics: {final_output_pdf} "
-        f"(written={written}, preserved={preserved}, failed={failed}, "
-        f"stripped_pages={strip_stats.pages}, stripped_streams={strip_stats.streams}, "
-        f"removed_text_objects={strip_stats.removed_text_objects}, "
-        f"retained_risky_text_objects={strip_stats.retained_risky_text_objects}, "
-        f"retained_preserved_region_text_objects={strip_stats.retained_preserved_region_text_objects}, "
-        f"retained_form_text_objects={strip_stats.retained_form_text_objects}, "
-        f"retained_unterminated_text_objects={strip_stats.retained_unterminated_text_objects}, "
-        f"forms={strip_stats.forms}) "
+        f"Filled PDF with in-place text replacement: {final_output_pdf} "
+        f"(written={written}, preserved={preserved}, review={review}, failed={failed}) "
         f"elapsed={time.perf_counter() - overall_started:.2f}s",
         flush=True,
     )

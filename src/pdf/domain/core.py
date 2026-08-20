@@ -105,8 +105,9 @@ SECTION_HEADING_REGEX = re.compile(
 )
 FORMULA_SYMBOL_REGEX = re.compile(r"[=≈≤≥∑∫√^×÷∈∉∞∂∆∇∝⊂⊆⊕⊗→←↔±≠]")
 FORMULA_TOKEN_REGEX = re.compile(
-    r"(?:\b[A-Za-z]\w*\s*\(|\b(?:sin|cos|tan|log|ln|max|min|softmax)\b|[_^{}]|[₀-₉⁰-⁹])"
+    r"(?:\b[A-Za-z]\w*\s*\(|\b(?:sin|cos|tan|log|ln|max|min|softmax)\b|[_^{}]|[₀-₉₋⁰-⁹⁻])"
 )
+GREEK_LETTER_REGEX = re.compile(r"[α-ωΑ-Ω]")
 PRIVATE_USE_GARBAGE_REGEX = re.compile(r"[\uE000-\uF8FF\U000F0000-\U000FFFFD\U00100000-\U0010FFFD]")
 MATH_FONT_REGEX = re.compile(r"^(?:CM|MSAM|MSBM|StandardSymL|Symbol|MTExtra)", re.IGNORECASE)
 INLINE_FORMULA_PLACEHOLDER_REGEX = re.compile(r"@@WASABI_INLINE_FORMULA_\d+@@")
@@ -719,8 +720,6 @@ def is_formula_span(span: Dict[str, Any], block_font_size: float = 10.0) -> bool
         return False
 
     font_name = str(span.get("font", "") or "")
-    size = float(span.get("size", 0) or 0)
-    flags = int(span.get("flags", 0) or 0)
 
     if MATH_FONT_REGEX.search(font_name):
         return True
@@ -728,10 +727,10 @@ def is_formula_span(span: Dict[str, Any], block_font_size: float = 10.0) -> bool
         return True
     if FORMULA_TOKEN_REGEX.search(normalized) and len(re.findall(r"[A-Za-z0-9]", normalized)) <= 12:
         return True
-    if len(normalized) <= 4 and re.fullmatch(r"[A-Za-z0-9_]+", normalized) and size and size < max(block_font_size * 0.82, block_font_size - 1.2):
+    if GREEK_LETTER_REGEX.search(normalized):
         return True
-    if flags & 2 and len(normalized) <= 4 and re.fullmatch(r"[A-Za-z0-9_]+", normalized):
-        return True
+    if re.fullmatch(r"[A-Za-z]{1,8}", normalized):
+        return False
     return False
 
 
@@ -873,7 +872,7 @@ def tokenize_plain_text(text: str) -> List[str]:
     return [
         token
         for token in re.findall(
-            r"(?:[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\s*)|(?:https?://\S+\s*)|[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]|[A-Za-z0-9_]+(?:['-][A-Za-z0-9_]+)*\s*|\s+|[^\s]",
+            r"(?:\[\d+(?:\s*,\s*\d+)*\]\s*)|(?:[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\s*)|(?:https?://\S+\s*)|[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]|[A-Za-z0-9_]+(?:['-][A-Za-z0-9_]+)*\s*|\s+|[^\s]",
             text,
         )
         if token
@@ -893,6 +892,11 @@ def is_leading_punctuation_token(token: str) -> bool:
 def is_footnote_marker_token(token: str) -> bool:
     normalized = (token or "").strip()
     return normalized in {"*", "∗", "†", "‡", "§", "¶"}
+
+
+def is_citation_like_token(token: str) -> bool:
+    normalized = (token or "").strip()
+    return bool(re.fullmatch(r"\[\d+(?:\s*,\s*\d+)*\]", normalized))
 
 
 def metadata_line_start_markers(block: Dict[str, Any]) -> List[str]:
@@ -1167,6 +1171,7 @@ def wrap_text_for_box_precise(
     max_width = max(rect.width - 4, fontsize * 1.2)
     hanging_tolerance = max(fontsize * 0.7, 2.0)
     marker_tolerance = max(fontsize * 0.5, 1.5)
+    citation_tolerance = max(fontsize * 1.8, 6.0)
     lines: List[str] = []
     current = ""
     current_width = 0.0
@@ -1184,6 +1189,10 @@ def wrap_text_for_box_precise(
         if current and current_width + token_width > max_width:
             overflow = current_width + token_width - max_width
             if is_footnote_marker_token(token_text) and overflow <= marker_tolerance:
+                current += token_text
+                current_width += token_width
+                continue
+            if is_citation_like_token(token_text) and overflow <= citation_tolerance:
                 current += token_text
                 current_width += token_width
                 continue
@@ -1209,6 +1218,39 @@ def should_use_body_bbox_wrap(block: Dict[str, Any], font_role: str) -> bool:
         font_role == "body"
         and bool(block.get("isBodyLike"))
         and (str(block.get("blockType") or "") == "body" or is_footnote_block(block))
+    )
+
+
+def should_use_metadata_bbox_reflow(block: Dict[str, Any]) -> bool:
+    if str(block.get("blockType") or "") != "metadata":
+        return False
+    if is_footnote_block(block):
+        return False
+    if str(block.get("role") or "") != "paragraph":
+        return False
+    return True
+
+
+def is_tiny_metadata_visual_label(block: Dict[str, Any]) -> bool:
+    if str(block.get("blockType") or "") != "metadata":
+        return False
+    if str(block.get("role") or "") != "paragraph":
+        return False
+    layout_lines = block.get("layoutLines") or []
+    if len(layout_lines) != 1:
+        return False
+    bbox = block.get("bbox") or []
+    if len(bbox) != 4:
+        return False
+    width = max(float(bbox[2]) - float(bbox[0]), 0.0)
+    height = max(float(bbox[3]) - float(bbox[1]), 0.0)
+    font_size = float(block.get("fontSize") or 0.0)
+    text = sanitize_translated_text(block.get("text") or "")
+    return (
+        width <= 90.0
+        and height <= 12.0
+        and font_size <= 6.0
+        and len(text) >= 8
     )
 
 
@@ -1528,6 +1570,7 @@ def wrap_body_text_to_bbox(
         max_width = max(rect.width - 1.0, fontsize)
         hanging_tolerance = max(fontsize * 1.15, 4.0)
         marker_tolerance = max(fontsize * 0.5, 1.5)
+        citation_tolerance = max(fontsize * 1.8, 6.0)
         tokens = tokenize_plain_text(normalized_segment)
         lines: List[str] = []
         current_tokens: List[str] = []
@@ -1551,6 +1594,10 @@ def wrap_body_text_to_bbox(
             if current_tokens and next_width > max_width:
                 overflow = next_width - max_width
                 if is_footnote_marker_token(token_text) and overflow <= marker_tolerance:
+                    current_tokens.append(token_text)
+                    current_width = next_width
+                    continue
+                if is_citation_like_token(token_text) and overflow <= citation_tolerance:
                     current_tokens.append(token_text)
                     current_width = next_width
                     continue
@@ -1652,27 +1699,6 @@ def wrap_text_by_source_line_breaks(
     if len(source_lines) <= 1:
         return normalized
 
-    if (
-        block.get("blockType") in ("metadata", "footnote")
-        and block.get("layoutIntent") != "note_paragraph"
-        and rect is not None
-        and fontsize is not None
-        and measure_font is not None
-    ):
-        author_wrapped = wrap_author_metadata_by_source_roles(normalized, block)
-        if author_wrapped:
-            return author_wrapped
-        compact_wrapped = wrap_compact_metadata_by_fields(normalized, block)
-        if compact_wrapped:
-            return compact_wrapped
-        segments = split_metadata_marker_segments(normalized, block)
-        if len(segments) > 1:
-            wrapped_segments = [
-                wrap_text_for_box_precise(segment, rect, fontsize, measure_font)
-                for segment in segments
-            ]
-            return "\n".join(segment for segment in wrapped_segments if segment.strip())
-
     if footnote_markers_are_separate_source_lines(block):
         segments = split_metadata_marker_segments(normalized, block)
         if len(segments) > 1:
@@ -1737,6 +1763,10 @@ def should_preserve_source_line_breaks(
     font_role: str,
 ) -> bool:
     if should_use_body_bbox_wrap(block, font_role):
+        return False
+    if should_use_metadata_bbox_reflow(block):
+        return False
+    if str(block.get("blockType") or "") == "caption":
         return False
     if (
         str(block.get("blockType") or "") == "metadata"
@@ -2007,9 +2037,13 @@ def resolve_latin_font_by_family(
     if normalized_family == "cour":
         return {"fontname": "cour"}
     if normalized_family == "helv":
+        if preferred_style == "bold_italic":
+            return {"fontname": "hebi"}
+        if preferred_style == "italic":
+            return {"fontname": "heit"}
         if preferred_style == "bold":
-            return {"fontname": "helvB"}
-        return {"fontname": "helvB" if bold else "helv"}
+            return {"fontname": "hebo"}
+        return {"fontname": "hebo" if bold else "helv"}
 
     if preferred_style == "monospace":
         return {"fontname": "cour"}
@@ -3020,6 +3054,23 @@ def is_table_body_block(block: Dict[str, Any]) -> bool:
     if is_short_or_tableish_block(block) and len(text) <= 48:
         return True
     return False
+
+
+def has_section_heading_signal(block: Dict[str, Any]) -> bool:
+    if block.get("role") == "heading":
+        return True
+    if block.get("doclingLabel") in ("section_header", "title"):
+        return True
+    if str(block.get("blockType") or "") == "heading":
+        return True
+    return False
+
+
+def block_width(block: Dict[str, Any]) -> float:
+    bbox = block.get("bbox") or [0, 0, 0, 0]
+    if len(bbox) != 4:
+        return 0.0
+    return max(float(bbox[2]) - float(bbox[0]), 0.0)
 
 
 def is_figure_label_block(block: Dict[str, Any]) -> bool:

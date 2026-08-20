@@ -65,6 +65,30 @@ const buildDeprecatedModelGuidance = (client, err) => {
     ].join("\n");
 };
 
+const withTimeout = async (promise, timeoutMs, timeoutLabel) => {
+    if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+        return await promise;
+    }
+
+    let timer = null;
+    try {
+        return await Promise.race([
+            promise,
+            new Promise((_, reject) => {
+                timer = setTimeout(() => {
+                    const error = new Error(
+                        `${timeoutLabel} timed out after ${timeoutMs}ms`,
+                    );
+                    error.code = "ETIMEDOUT";
+                    reject(error);
+                }, timeoutMs);
+            }),
+        ]);
+    } finally {
+        if (timer) clearTimeout(timer);
+    }
+};
+
 const buildProviderClient = (providerName, config) => {
     const providerConfig = config[providerName];
     if (!providerConfig) throw new Error(`Unknown provider: ${providerName}`);
@@ -86,6 +110,7 @@ const buildProviderClient = (providerName, config) => {
         const client = new OpenAI({
             apiKey: providerConfig.apiKey,
             baseURL: providerConfig.baseURL,
+            timeout: providerConfig.timeoutMs,
         });
         _callRaw = async (systemInstruction, userContent, forceJson) => {
             const options = {
@@ -135,16 +160,21 @@ export const createAIProvider = (
     ) => {
         logger.write(
             "REQUEST",
-            `PROVIDER: ${client.providerName}\nMODEL: ${client.modelName}\nSYSTEM:\n${systemInstruction}\n\nUSER:\n${userContent}`,
+            `PROVIDER: ${client.providerName}\nMODEL: ${client.modelName}\nTIMEOUT_MS: ${client.providerConfig.timeoutMs ?? "none"}\nSYSTEM:\n${systemInstruction}\n\nUSER:\n${userContent}`,
         );
-        const responseText = await client.callRaw(
-            systemInstruction,
-            userContent,
-            forceJsonMode,
+        const startedAt = Date.now();
+        const responseText = await withTimeout(
+            client.callRaw(
+                systemInstruction,
+                userContent,
+                forceJsonMode,
+            ),
+            client.providerConfig.timeoutMs,
+            `${client.providerName}:${client.modelName}`,
         );
         logger.write(
             "RESPONSE",
-            `PROVIDER: ${client.providerName}\nMODEL: ${client.modelName}\n${responseText}`,
+            `PROVIDER: ${client.providerName}\nMODEL: ${client.modelName}\nELAPSED_MS: ${Date.now() - startedAt}\n${responseText}`,
         );
         return responseText;
     };

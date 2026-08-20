@@ -7,6 +7,96 @@ from typing import Any, Dict, List, Optional, Tuple
 from domain.core import *
 
 
+def should_use_full_bbox_reflow(block: Dict[str, Any]) -> bool:
+    return (
+        (
+            str(block.get("blockType") or "") in {"body", "caption"}
+            or should_use_metadata_bbox_reflow(block)
+        )
+        and not is_footnote_block(block)
+    )
+
+
+def resolve_caption_render_policy(block: Dict[str, Any]) -> str:
+    existing = str(block.get("renderPolicy") or "").strip()
+    if existing in {"plain_reflow", "mixed_reflow", "preserve_visual"}:
+        return existing
+
+    if block.get("preserveOriginal"):
+        return "preserve_visual"
+
+    if str(block.get("blockType") or "") != "caption":
+        return ""
+
+    layout_lines = block.get("layoutLines") or []
+    text_items = []
+    for line in layout_lines:
+        for item in (line.get("items") or []):
+            text_value = normalize_text(str(item.get("text", "") or ""))
+            if not text_value:
+                continue
+            if str(item.get("type") or "") == "text":
+                text_items.append(item)
+
+    bbox = block.get("bbox") or []
+    if len(bbox) == 4:
+        width = max(float(bbox[2]) - float(bbox[0]), 0.0)
+        height = max(float(bbox[3]) - float(bbox[1]), 0.0)
+    else:
+        width = 0.0
+        height = 0.0
+
+    normalized_lines = []
+    line_widths = []
+    line_offsets = []
+    for line in layout_lines:
+        line_text = normalize_text(
+            "".join(str(item.get("text", "") or "") for item in (line.get("items") or []))
+        )
+        if not line_text:
+            continue
+        normalized_lines.append(line_text)
+        line_bbox = line.get("bbox") or []
+        if len(line_bbox) == 4:
+            try:
+                line_widths.append(max(float(line_bbox[2]) - float(line_bbox[0]), 0.0))
+                if len(bbox) == 4:
+                    line_offsets.append(max(float(line_bbox[0]) - float(bbox[0]), 0.0))
+            except Exception:
+                pass
+
+    if width > 0 and len(line_widths) >= 3:
+        narrow_count = sum(1 for value in line_widths if value / max(width, 1.0) < 0.55)
+        if narrow_count >= 2 and max(line_widths) / max(width, 1.0) < 0.72:
+            return "preserve_visual"
+    if line_offsets and width > 0 and max(line_offsets) >= max(width * 0.22, 24.0):
+        return "preserve_visual"
+    if any(
+        bool(item.get("isBoldLike"))
+        or bool(item.get("isItalicLike"))
+        or bool(item.get("isMonospaceLike"))
+        for item in text_items
+    ):
+        return "mixed_reflow"
+    return "plain_reflow"
+
+
+def resolve_render_policy(block: Dict[str, Any]) -> str:
+    existing = str(block.get("renderPolicy") or "").strip()
+    if existing:
+        return existing
+    if is_tiny_metadata_visual_label(block):
+        return "preserve_visual"
+    caption_policy = resolve_caption_render_policy(block)
+    if caption_policy:
+        return caption_policy
+    if block.get("preserveOriginal"):
+        return "preserve_visual"
+    if should_use_full_bbox_reflow(block):
+        return "plain_reflow"
+    return "structured_layout"
+
+
 def fit_drop_cap_block(
     page,
     rect,
@@ -127,6 +217,7 @@ def fit_textbox(
     measure_font = create_measure_font(fitz, font_options)
     preserve_source_breaks = should_preserve_source_line_breaks(block, font_role)
     layout_lines = block.get("layoutLines") or []
+    full_bbox_reflow = should_use_full_bbox_reflow(block)
 
     # Very thin single-line blocks are more reliable with direct baseline text placement
     # than with insert_textbox, especially for CJK fonts near the rect height limit.
@@ -167,6 +258,24 @@ def fit_textbox(
 
     while size >= min_font_size:
         use_body_wrap = should_use_body_bbox_wrap(block, font_role)
+        if full_bbox_reflow and not use_body_wrap:
+            wrapped = wrap_text_for_box_precise(text, rect, size, measure_font)
+            shape = page.new_shape()
+            overflow = shape.insert_textbox(
+                rect,
+                wrapped,
+                fontsize=size,
+                color=primary_color,
+                align=fitz.TEXT_ALIGN_LEFT,
+                rotate=rotation,
+                lineheight=1.05 if bold else 1.1,
+                **font_options,
+            )
+            if overflow >= 0:
+                shape.commit()
+                return True
+            size -= 0.5
+            continue
         if use_body_wrap:
             irregular_line_specs = []
             if has_irregular_body_wrap_shape(block) or has_dynamic_body_line_bounds(block):
@@ -464,11 +573,15 @@ def redact_block_text_preserving_inline_formulas(page, block: Dict[str, Any], fi
             rect = fitz.Rect(*item.get("bbox", [0, 0, 0, 0]))
             if rect.is_empty or rect.is_infinite:
                 continue
-            page.add_redact_annot(rect, fill=(1, 1, 1))
+            page.add_redact_annot(rect, fill=False, cross_out=False)
             redact_count += 1
     if redact_count <= 0:
         return False
-    page.apply_redactions()
+    page.apply_redactions(
+        images=fitz.PDF_REDACT_IMAGE_NONE,
+        graphics=fitz.PDF_REDACT_LINE_ART_NONE,
+        text=fitz.PDF_REDACT_TEXT_REMOVE,
+    )
     return True
 
 
@@ -626,6 +739,7 @@ def fit_textbox_with_uniform_block_style(
     measure_font = create_measure_font(fitz, font_options)
     preserve_source_breaks = should_preserve_source_line_breaks(block, str(style["font_role"]))
     use_body_wrap = should_use_body_bbox_wrap(block, str(style["font_role"]))
+    full_bbox_reflow = should_use_full_bbox_reflow(block)
 
     while size >= min_font_size:
         if use_body_wrap:
@@ -671,6 +785,26 @@ def fit_textbox_with_uniform_block_style(
                 lineheight,
                 color=color,
             ):
+                return True
+            size -= 0.5
+            continue
+
+        if full_bbox_reflow:
+            lineheight = 1.05 if style["bold"] else 1.1
+            wrapped = wrap_text_for_box_precise(text, rect, size, measure_font)
+            shape = page.new_shape()
+            overflow = shape.insert_textbox(
+                rect,
+                wrapped,
+                fontsize=size,
+                color=color,
+                align=fitz.TEXT_ALIGN_LEFT,
+                rotate=rotation,
+                lineheight=lineheight,
+                **font_options,
+            )
+            if overflow >= 0:
+                shape.commit()
                 return True
             size -= 0.5
             continue
@@ -1291,9 +1425,6 @@ def fit_mixed_textbox(
             **font_options,
         )
 
-        if redact_before_write:
-            page.add_redact_annot(rect, fill=(1, 1, 1))
-            page.apply_redactions()
         shape.commit(overlay=True)
         render_inline_formula_clips(
             page,
@@ -1363,41 +1494,13 @@ def write_translated_block(
     block: Dict[str, Any],
     fitz,
     *,
-    source_doc=None,
-    preserve_mode: str = "pdf",
-    erase_mode: str = "redact",
     debug_visuals: bool = False,
 ) -> Optional[bool]:
     rect = fitz.Rect(*block.get("bbox", [0, 0, 0, 0]))
     if rect.is_empty or rect.is_infinite:
         return None
 
-    if block.get("blockType") == "reference_block" or block.get("doclingLabel") == "reference":
-        block["preserveOriginal"] = True
-
-    if block.get("preserveOriginal"):
-        if source_doc is not None:
-            source_page_number = max(int(block.get("page", 1)) - 1, 0)
-            clip = source_doc[source_page_number].rect & rect
-            if clip.is_empty:
-                return False
-            if preserve_mode == "image":
-                return insert_source_clip_as_image(
-                    page,
-                    source_doc,
-                    source_page_number,
-                    rect,
-                    clip,
-                    zoom=4.0,
-                )
-            if insert_source_clip_as_pdf(page, source_doc, source_page_number, rect, clip):
-                return True
-            return False
-        return None
-
     raw_translated = sanitize_translated_text(block.get("translatedText") or "")
-    if not raw_translated and block.get("preserveOriginal"):
-        raw_translated = sanitize_translated_text(block.get("text") or "")
     if is_translation_meta_note(raw_translated):
         return False
     if is_orphan_punctuation_translation(block, raw_translated):
@@ -1405,10 +1508,13 @@ def write_translated_block(
     translated = normalize_translated_block_text(
         raw_translated,
         block,
-        keep_preservable_placeholders=bool(source_doc is not None and should_use_mixed_textbox(block)),
+        keep_preservable_placeholders=False,
     )
     if not translated:
         return None
+
+    render_policy = resolve_render_policy(block)
+    block["renderPolicy"] = render_policy
 
     default_style = build_block_default_style(block)
     block["_renderDefaultStyle"] = default_style
@@ -1423,7 +1529,7 @@ def write_translated_block(
     else:
         min_font_size = 4.5
 
-    can_use_mixed = should_use_mixed_textbox(block) and source_doc is not None
+    can_use_mixed = False
     success = False
     use_visual_style_reflow = (
         not block_has_uniform_visual_style(block)
@@ -1438,6 +1544,18 @@ def write_translated_block(
         block_has_uniform_visual_style(block)
         and str(block.get("blockType") or "") in {"heading", "metadata", "body", "drop_cap"}
     )
+
+    if render_policy == "preserve_visual":
+        block.pop("_renderDefaultStyle", None)
+        return None
+
+    if str(block.get("blockType") or "") == "caption":
+        if render_policy == "mixed_reflow":
+            use_visual_style_reflow = True
+            use_uniform_block_style = False
+        elif render_policy == "plain_reflow":
+            use_visual_style_reflow = False
+            use_uniform_block_style = False
 
     if str(block.get("blockType") or "") == "drop_cap":
         success = fit_drop_cap_block(
@@ -1479,7 +1597,7 @@ def write_translated_block(
         try:
             success = fit_mixed_textbox(
                 page,
-                source_doc,
+                None,
                 rect,
                 translated,
                 block,
@@ -1490,32 +1608,18 @@ def write_translated_block(
                 min_font_size=min_font_size,
                 font_role=font_role,
                 debug_visuals=debug_visuals,
-                redact_before_write=(erase_mode == "redact"),
+                redact_before_write=False,
             )
         except Exception:
             success = False
 
     if not success:
-        use_literal_inline = (
-            erase_mode == "none"
-            or source_doc is None
-            or not should_use_mixed_textbox(block)
-        )
         translated = replace_inline_formula_placeholders(
             translated,
             block,
             base_font_size,
-            use_literal=use_literal_inline,
+            use_literal=True,
         )
-        if erase_mode == "redact":
-            preserved_inline = (
-                False
-                if use_literal_inline
-                else redact_block_text_preserving_inline_formulas(page, block, fitz)
-            )
-            if not preserved_inline:
-                page.add_redact_annot(rect, fill=(1, 1, 1))
-                page.apply_redactions()
         success = fit_textbox(
             page,
             rect,
@@ -1528,7 +1632,7 @@ def write_translated_block(
             min_font_size=min_font_size,
             font_role=font_role,
             debug_visuals=debug_visuals,
-            source_doc=source_doc,
+            source_doc=None,
         )
 
     block.pop("_renderDefaultStyle", None)

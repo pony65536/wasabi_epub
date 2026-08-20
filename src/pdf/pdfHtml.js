@@ -8,6 +8,7 @@ const escapeHtml = (value) =>
         .replace(/"/g, "&quot;");
 
 const INLINE_FORMULA_PLACEHOLDER_REGEX = /@@WASABI_INLINE_FORMULA_\d+@@/g;
+const INLINE_PRESERVE_PLACEHOLDER_REGEX = /@@WASABI_INLINE_PRESERVE_\d+@@/g;
 const LATEX_DELIMITED_MATH_REGEX =
     /\\\[((?:.|\n)*?)\\\]|\\\(((?:.|\n)*?)\\\)|\$\$([\s\S]*?)\$\$|(^|[^\\])\$([^$\n]+?)\$(?=$|[^\\$])/g;
 const TRANSLATION_NOTE_PATTERNS = [
@@ -76,6 +77,57 @@ const buildPdfTranslationSourceText = (block, blocksById) => {
         return blockText;
     }
     return `${leadText}${blockText}`;
+};
+
+const normalizedInlineItemText = (item) =>
+    String(item?.text ?? "").replace(/\s+/g, " ").trim();
+
+const isInlineNoiseFragment = (item) => {
+    const text = normalizedInlineItemText(item);
+    if (!text) return true;
+    if (/^[,.;:()[\]{}\-–—/\\|]+$/.test(text)) return true;
+    if (/^[,.;:()[\]{}\-–—/\\|]*[→←↔]+[,.;:()[\]{}\-–—/\\|]*$/.test(text)) return true;
+    return false;
+};
+
+const isMonospacePreserveBlock = (block) => {
+    const blockType = String(block?.blockType || "");
+    if (blockType === "code") {
+        return true;
+    }
+    const lines = Array.isArray(block?.layoutLines) ? block.layoutLines : [];
+    const items = lines.flatMap((line) =>
+        Array.isArray(line?.items)
+            ? line.items.filter((item) => String(item?.text || ""))
+            : [],
+    );
+    if (items.length === 0) {
+        return false;
+    }
+
+    const substantiveItems = items.filter((item) => !isInlineNoiseFragment(item));
+    if (substantiveItems.length === 0) {
+        return false;
+    }
+
+    const totalWeight = substantiveItems.reduce(
+        (sum, item) => sum + Math.max(normalizedInlineItemText(item).length, 1),
+        0,
+    );
+    const monospaceWeight = substantiveItems
+        .filter((item) => Boolean(item?.isMonospaceLike))
+        .reduce((sum, item) => sum + Math.max(normalizedInlineItemText(item).length, 1), 0);
+    const monospaceRatio = monospaceWeight / Math.max(totalWeight, 1);
+
+    if (monospaceRatio >= 0.95) {
+        return true;
+    }
+
+    return (
+        monospaceRatio >= 0.9 &&
+        String(block?.styleFamilyClass || "") === "mono" &&
+        Boolean(block?.hasMonospaceLike)
+    );
 };
 
 const wrapWithStyleMarkers = (html, styleMarkers) => {
@@ -156,6 +208,13 @@ const buildLineBasedFormulaMarkup = (block) => {
                 lineHtml += `<span data-wasabi-inline-formula="${escapeHtml(key)}" translate="no">${escapeHtml(itemText)}</span>`;
                 continue;
             }
+            if (item?.isMonospaceLike) {
+                const key = `@@WASABI_INLINE_PRESERVE_${counter}@@`;
+                counter += 1;
+                placeholders[key] = itemText;
+                lineHtml += `<span data-wasabi-inline-preserve="${escapeHtml(key)}" translate="no">${escapeHtml(itemText)}</span>`;
+                continue;
+            }
             lineHtml += escapeHtml(itemText);
         }
         if (lineHtml) lineFragments.push(lineHtml);
@@ -171,7 +230,11 @@ const buildLineBasedFormulaMarkup = (block) => {
 const restoreInlineFormula = (text, placeholders = {}) => {
     let restored = String(text ?? "");
     for (const [key, value] of Object.entries(placeholders)) {
-        restored = restored.split(key).join(value);
+        const replacement =
+            value && typeof value === "object" && "text" in value
+                ? String(value.text ?? "")
+                : String(value ?? "");
+        restored = restored.split(key).join(replacement);
     }
     return restored;
 };
@@ -263,6 +326,22 @@ const extractTranslatedTextAndStyles = ($, node, placeholders, styleMarkers, sta
         return;
     }
 
+    const preserveKey = $(node).attr("data-wasabi-inline-preserve");
+    if (preserveKey && placeholders[preserveKey]) {
+        const start = state.text.length;
+        state.text += preserveKey;
+        const activeMarker = state.activeStyleMarkers[state.activeStyleMarkers.length - 1];
+        if (activeMarker) {
+            const existing = state.styleRuns[state.styleRuns.length - 1];
+            if (existing && existing.markerId === activeMarker && existing.end === start) {
+                existing.end = state.text.length;
+            } else {
+                state.styleRuns.push({ markerId: activeMarker, start, end: state.text.length });
+            }
+        }
+        return;
+    }
+
     const styleMarker = $(node).attr("data-wasabi-style-marker");
     if (styleMarker && styleMarkers?.[styleMarker]) {
         state.activeStyleMarkers.push(styleMarker);
@@ -290,6 +369,16 @@ export const pdfJsonToHtml = (pdfJson) => {
     const title = pdfJson?.title || pdfJson?.sourceFile || "PDF Document";
     const blocks = Array.isArray(pdfJson?.blocks) ? pdfJson.blocks : [];
     const blocksById = new Map(blocks.map((block) => [String(block.id), block]));
+    for (const block of blocks) {
+        if (block?.preserveOriginal) continue;
+        if (!isMonospacePreserveBlock(block)) continue;
+        block.preserveOriginal = true;
+        block.preserveReason = String(block.preserveReason || "code_block");
+        if (String(block.blockType || "") !== "code") {
+            block.blockType = "code";
+        }
+        block.role = "preserved";
+    }
     const body = blocks
         .filter(
             (block) =>
@@ -344,13 +433,19 @@ export const applyTranslatedHtmlToPdfJson = (pdfJson, translatedHtml) => {
             extractionState,
         );
         const translatedText = stripLatexMathDelimiters(
-            restoreLatexDelimitedSegmentsToPlaceholders(
-                extractionState.text,
+            restoreInlineFormula(
+                restoreLatexDelimitedSegmentsToPlaceholders(
+                    extractionState.text,
+                    block.inlineFormulaPlaceholders || {},
+                ),
                 block.inlineFormulaPlaceholders || {},
             ),
         ).replace(/\s+/g, " ").trim();
         if (translatedText && INLINE_FORMULA_PLACEHOLDER_REGEX.test(translatedText)) {
             INLINE_FORMULA_PLACEHOLDER_REGEX.lastIndex = 0;
+        }
+        if (translatedText && INLINE_PRESERVE_PLACEHOLDER_REGEX.test(translatedText)) {
+            INLINE_PRESERVE_PLACEHOLDER_REGEX.lastIndex = 0;
         }
         if (translatedText && isTranslationMetaNote(translatedText)) {
             block.translationMetaNote = translatedText;

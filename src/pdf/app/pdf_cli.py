@@ -8,6 +8,7 @@ from services.pdf_services import (
     extract_pdf_blocks,
     fill_translated_pdf,
     strip_pdf_text,
+    validate_pdf_output,
 )
 
 
@@ -39,6 +40,14 @@ def build_parser() -> argparse.ArgumentParser:
     fill_parser.add_argument("translated_json")
     fill_parser.add_argument("output_pdf")
 
+    validate_parser = subparsers.add_parser(
+        "validate", help="validate translated PDF output"
+    )
+    validate_parser.add_argument("input_pdf")
+    validate_parser.add_argument("translated_json")
+    validate_parser.add_argument("output_pdf")
+    validate_parser.add_argument("validation_json")
+
     return parser
 
 
@@ -59,4 +68,15 @@ def main(argv: List[str]) -> int:
         )
     elif args.command == "fill":
         fill_translated_pdf(args.input_pdf, args.translated_json, args.output_pdf)
+    elif args.command == "validate":
+        report = validate_pdf_output(
+            args.input_pdf,
+            args.translated_json,
+            args.output_pdf,
+            args.validation_json,
+        )
+        print(
+            f"Validated PDF output: {args.validation_json} "
+            f"(status={report.get('status')}, issues={len(report.get('issues', []))})"
+        )
     return 0

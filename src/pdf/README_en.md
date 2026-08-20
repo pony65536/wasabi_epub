@@ -46,7 +46,7 @@ The goal is one-way layering only: upper layers depend on lower layers, never th
 - `services/` orchestrates use cases only, not low-level heuristics.
 - `domain/layout.py` answers “how blocks are detected” and “how layout/block types are classified”.
 - `domain/preservation.py` answers “which regions should be preserved as-is”.
-- `domain/rendering.py` answers “how translated text is written back into the PDF”.
+- `domain/rendering.py` answers “how translated text is written back into the PDF”, routing between full-block reflow and `preserve_visual` via `renderPolicy`.
 - `domain/core.py` keeps shared lower-level logic that has not yet been further split and should not keep absorbing more use-case logic.
 - The root keeps only `translate_pdf.py` as the stable CLI entry; the rest of the implementation lives in layered subdirectories.
 
@@ -88,7 +88,8 @@ At minimum, verify:
 
 - `pdf_blocks.json` is generated
 - `doclingSummary` exists
-- `blocks[*].blockType / layoutIntent / preserveOriginal` look structurally reasonable
+- `blocks[*].blockType / layoutIntent / preserveOriginal / renderPolicy` look structurally reasonable
+- `metadata` defaults to the same full-block reflow path as body text; complex captions / tiny labels use `preserve_visual`
 - the filled PDF opens successfully
 
 ## Further Refactoring Notes

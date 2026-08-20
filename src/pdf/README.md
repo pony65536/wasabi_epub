@@ -46,7 +46,7 @@ src/pdf/
 - `services/` 只编排用例，不承载底层启发式。
 - `domain/layout.py` 负责“如何识别块、如何判断 layout/block type”。
 - `domain/preservation.py` 负责“哪些区域保留原样”。
-- `domain/rendering.py` 负责“如何把翻译文本写回 PDF”。
+- `domain/rendering.py` 负责“如何把翻译文本写回 PDF”，并按 `renderPolicy` 在整块重排与 `preserve_visual` 间分流。
 - `domain/core.py` 只保留暂未进一步拆散的共享底层实现，不应再继续堆用例入口。
 - 根目录只保留 `translate_pdf.py` 作为稳定 CLI 入口，其余实现都放在分层子目录内。
 
@@ -88,7 +88,8 @@ python src/pdf/translate_pdf.py extract input/1706.03762v7.pdf output/pdf_blocks
 
 - `pdf_blocks.json` 能生成
 - `doclingSummary` 字段存在
-- `blocks[*].blockType / layoutIntent / preserveOriginal` 结构合理
+- `blocks[*].blockType / layoutIntent / preserveOriginal / renderPolicy` 结构合理
+- `metadata` 默认走与正文一致的整块换行，复杂 caption / 微小标签走 `preserve_visual`
 - `fill` 后输出 PDF 可打开
 
 ## 后续建议

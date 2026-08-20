@@ -33,6 +33,7 @@ import { saveEpub } from "./epub/epubSaver.js";
 import {
     extractPdfToJson,
     fillPdfFromJson,
+    validatePdfOutput,
 } from "./pdf/pdfBridge.js";
 import { applyTranslatedHtmlToPdfJson, pdfJsonToHtml } from "./pdf/pdfHtml.js";
 import { applyTranslatedHtmlToSubtitleJson, buildSubtitleJson, parseSrt, serializeSrt, subtitleJsonToHtml } from "./subtitle/srt.js";
@@ -628,7 +629,7 @@ export const runTranslationJob = async ({
     }
     console.log(`========================================\n`);
 
-    let shouldKeepArtifacts = debugMode;
+    let completed = false;
 
     try {
         const zip = new AdmZip(inputPath);
@@ -840,7 +841,7 @@ export const runHtmlTranslationJob = async ({
     }
     console.log(`========================================\n`);
 
-    let shouldKeepArtifacts = debugMode;
+    let completed = false;
 
     try {
         const chapterMap = createSingleHtmlChapterMap(inputPath);
@@ -972,6 +973,12 @@ export const runPdfTranslationJob = async ({
             ? `${fileInfo.name}_page-${selectionSlug}_${targetLanguageSlug}.pdf`
             : `${fileInfo.name}_${targetLanguageSlug}.pdf`,
     );
+    const validationJsonPath = path.resolve(
+        outputDir,
+        pageSelector
+            ? `${fileInfo.name}_page-${selectionSlug}_${targetLanguageSlug}.validation.json`
+            : `${fileInfo.name}_${targetLanguageSlug}.validation.json`,
+    );
     const cacheDir = path.resolve(
         projectRoot,
         pageSelector
@@ -1013,7 +1020,7 @@ export const runPdfTranslationJob = async ({
     }
     console.log(`========================================\n`);
 
-    let shouldKeepArtifacts = debugMode;
+    let completed = false;
 
     try {
         console.log("\n📤 Step 1: Extracting PDF text blocks to JSON...");
@@ -1159,27 +1166,52 @@ export const runPdfTranslationJob = async ({
         console.log("\n📥 Step 5: Filling translated text back into PDF...");
         await fillPdfFromJson(inputPath, translatedJsonPath, outputPdfPath, logger);
 
+        console.log("\n🔎 Step 6: Validating rendered PDF...");
+        const validationReport = await validatePdfOutput(
+            inputPath,
+            translatedJsonPath,
+            outputPdfPath,
+            validationJsonPath,
+            logger,
+        );
+        console.log(
+            `   Validation: status=${validationReport.status} issues=${validationReport.issues?.length || 0}`,
+        );
+
         const finalInputPath = path.resolve(inputDir, path.basename(inputPath));
         moveFileIfNeeded(inputPath, finalInputPath);
 
-        console.log(`\n✅ All done! Output: ${path.basename(outputPdfPath)}`);
+        if (validationReport.status === "ok") {
+            console.log(`\n✅ All done! Output: ${path.basename(outputPdfPath)}`);
+        } else {
+            console.log(
+                `\n⚠️ Render finished with review required. Validation: ${path.basename(validationJsonPath)}`,
+            );
+        }
+        completed = true;
         return {
             outputPath: outputPdfPath,
             htmlOutputPath: outputHtmlPath,
             cacheDir,
             logFile: logger.logFile,
+            validationPath: validationJsonPath,
+            validationStatus: validationReport.status,
         };
     } catch (error) {
-        shouldKeepArtifacts = debugMode;
         logger.write(
             "ERROR",
             `PDF Process Fatal Error: ${error.stack || error.message}`,
         );
         throw error;
     } finally {
-        if (!shouldKeepArtifacts) {
+        if (completed && !debugMode) {
             cache.removeDir();
             logger.remove();
+        } else if (!completed) {
+            logger.write(
+                "WARN",
+                `PDF rendering failed; cache retained for debugging: ${cacheDir}`,
+            );
         }
     }
 };
