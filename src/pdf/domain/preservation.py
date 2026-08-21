@@ -427,6 +427,22 @@ def is_side_marginalia_block(block: Dict[str, Any]) -> bool:
     )
 
 
+def is_strong_side_metadata_block(block: Dict[str, Any]) -> bool:
+    if str(block.get("blockType") or "") not in {"metadata", "page_header", "page_footer"}:
+        return False
+    if not is_side_marginalia_block(block):
+        return False
+
+    x0, y0, x1, y1 = block["bbox"]
+    page_width = max(float(block["pageWidth"] or 1), 1.0)
+    page_height = max(float(block["pageHeight"] or 1), 1.0)
+    width_ratio = (x1 - x0) / page_width
+    height_ratio = (y1 - y0) / page_height
+    text = core.normalize_text(block.get("text") or "")
+
+    return width_ratio <= 0.04 and height_ratio >= 0.45 and len(text) >= 40
+
+
 def detect_preserved_peripheral_block_ids(
     pages_blocks: List[List[Dict[str, Any]]],
 ) -> Set[str]:
@@ -473,6 +489,9 @@ def detect_preserved_peripheral_block_ids(
                 preserved_ids.add(block["id"])
                 continue
             if signature in repeated_side and is_side_marginalia_block(block):
+                preserved_ids.add(block["id"])
+                continue
+            if is_strong_side_metadata_block(block):
                 preserved_ids.add(block["id"])
                 continue
             if is_page_number_block(block) and y0 >= page_height * 0.89:

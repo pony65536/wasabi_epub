@@ -89,6 +89,36 @@ def _normalize_text_signature(value: str) -> str:
     return "".join(ch for ch in str(value or "").upper() if ch.isalnum()).strip()
 
 
+def _extract_page_line_hints(
+    doc: Any,
+    pages: Optional[List[int]],
+) -> Dict[int, List[List[float]]]:
+    selected_pages = set(pages) if pages else None
+    hints: Dict[int, List[List[float]]] = {}
+    for page_index in range(doc.page_count):
+        page_no = page_index + 1
+        if selected_pages is not None and page_no not in selected_pages:
+            continue
+        page = doc[page_index]
+        page_lines: List[List[float]] = []
+        for drawing in page.get_drawings():
+            rect = drawing.get("rect")
+            if not rect:
+                continue
+            x0, y0, x1, y1 = [float(v) for v in rect]
+            width = x1 - x0
+            height = y1 - y0
+            is_horizontal = width >= 150.0 and height <= 3.0
+            is_vertical = height >= 150.0 and width <= 3.0
+            if not (is_horizontal or is_vertical):
+                continue
+            page_lines.append([x0, y0, x1, y1])
+        if page_lines:
+            page_lines.sort(key=lambda line: (line[1], line[0]))
+            hints[page_no] = page_lines
+    return hints
+
+
 def _promote_table_headers(page_blocks: List[Dict[str, Any]], page_width: float) -> None:
     table_blocks = [
         block
@@ -781,9 +811,12 @@ def extract_blocks(
 ) -> None:
     fitz = common.require_fitz()
     pikepdf, models = common.require_pikepdf()
+    import detect_tables
+
     doc = fitz.open(input_pdf)
     pike_doc = pikepdf.Pdf.open(input_pdf)
     pages_blocks: List[List[Dict[str, Any]]] = []
+    page_line_hints = _extract_page_line_hints(doc, pages)
     page_heights = {
         page_index + 1: float(doc[page_index].rect.height)
         for page_index in range(len(doc))
@@ -1163,8 +1196,10 @@ def extract_blocks(
             "matchedBlocks": matched_docling_blocks,
             "labelCounts": docling_label_counts,
         },
+        "_pageLineHints": page_line_hints,
         "blocks": blocks,
     }
+    detect_tables.mark_table_blocks(payload)
     Path(output_json).parent.mkdir(parents=True, exist_ok=True)
     Path(output_json).write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     pike_doc.close()

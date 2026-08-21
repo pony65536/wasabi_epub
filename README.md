@@ -201,6 +201,7 @@ node index.js "book.epub" --debug
 - 使用 Node 做主流程编排，Python 负责提取和回填
 - 支持 `--page`
 - 会尽量保留图片、矢量图、页眉页脚等非正文区域
+- 当前表格检测更偏向论文版式；财报和艺术化表格暂不作为近期优化目标
 - Python 环境选择顺序为 `WASABI_PDF_PYTHON` -> `python3` -> `python`
 
 ### SRT
