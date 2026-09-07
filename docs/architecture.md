@@ -114,7 +114,11 @@ PDF Special Path
 
 系统针对长篇长文档图书翻译引入了**分层多智能体协同（Autonomous Translation Studio）与行内排版占位符系统**：
 
-1. **全书导演（Director Agent, `src/content/director.js`）**：
+1. **内存级 EPUB 智能自愈与重构（In-Memory EPUB Doctor, `src/epub/epubDoctor.js`）**：
+   - 解决早年转换书、OCR 盗版抓取书常有的“全书 50 万字塞在两三个大文件里、全书无 `<h1>-<h6>` 仅有 `<p class="calibre">`”的非标假章节痛点。
+   - **零重复磁盘 I/O 探针**：在读取 ZIP 目录后就地在内存中体检 `chapterMap`。检测到超大异常文件时，自动通过语义断点探测算法（模式识别章节序数与标题特征）将单个超大假章节无损切分为合法的多个标准小章节，规范化注入 `<h1>` 标签，并原地更新 `chapterMap` 与 `content.opf`。
+   - 后续的 Director Agent、并发翻译、缓存持久化直接基于清晰干净的细粒度章节运转，断点续跑粒度大幅提升。
+2. **全书导演（Director Agent, `src/content/director.js`）**：
    - 处于 EPUB 主流程的 **Step 0**。在全书动工前，分层抽样全书骨架（跳过封面、TOC、版权等非实质页），一次性萃取全书的文体风格（Tone）、角色表与人称代词（Character Bible，杜绝男女代词乱飘）、世界观核心专有名词（Worldview）。
    - 产物结构化持久化至 `.cache/book_bible.json`，供人工二次审核或断点续跑，并作为全局约束动态挂载注入所有批次翻译 Prompt。
 2. **动态生长记忆中枢（Living Memory Store, `src/content/memory.js`）**：

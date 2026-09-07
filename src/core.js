@@ -20,6 +20,7 @@ import { createBatchQueue } from "./translation/batchQueue.js";
 import { planTranslationOrder } from "./agent.js";
 import { runDirectorAgent } from "./content/director.js";
 import { LivingMemoryStore } from "./content/memory.js";
+import { repairChapterMapInPlace } from "./epub/epubDoctor.js";
 import {
     analyzeHeadingFormats,
     standardizeHeadingsByRules,
@@ -638,6 +639,10 @@ export const runTranslationJob = async ({
         const zip = new AdmZip(inputPath);
         const zipEntries = zip.getEntries();
         const chapterMap = createChapterMap(zipEntries);
+
+        // 🩺 内存级就地体检与重构：针对非标/超大单文件假章节进行智能切分
+        repairChapterMapInPlace(chapterMap, logger);
+
         const referencedIds = collectReferencedIds(chapterMap);
         const definedClasses = collectDefinedClasses(zipEntries);
 
