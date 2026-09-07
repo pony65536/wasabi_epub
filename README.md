@@ -89,13 +89,13 @@ OPENROUTER_API_KEY=your_openrouter_api_key
 GEMINI_API_KEY=your_gemini_api_key
 MIMO_API_KEY=your_mimo_api_key
 
-# 可选：覆盖默认 base URL
+# 可选：覆盖默认 base URL（支持接入任意第三方 OpenAI 兼容格式的中转站）
 # QWEN_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
 # MIMO_BASE_URL=https://api.xiaomimimo.com/v1
-# OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
+# OPENROUTER_BASE_URL=https://api.your-relay.com/v1
 
-# 可选：OpenRouter reasoning 开关
-# OPENROUTER_REASONING_ENABLED=true
+# 可选：OpenRouter reasoning 开关（若中转站不兼容 reasoning 参数请设为 false）
+# OPENROUTER_REASONING_ENABLED=false
 ```
 
 默认行为：

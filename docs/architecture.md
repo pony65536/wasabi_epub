@@ -142,6 +142,8 @@ PDF Special Path
 - `gemini` 使用 `@google/generative-ai`
 - `qwen`、`mimo`、`openrouter` 统一走 OpenAI 兼容接口
 - 主 Provider 调用失败时，如果命中内容安全策略，可自动回退到 fallback provider
+- **中转站协议与 SSE 流式自适应兼容（最新演进）**：
+  - 针对各类第三方聚合中转站（NewAPI / OneAPI / 社区中转站）在开启 `response_format: { type: "json_object" }` 时强行返回 Server-Sent Events (SSE) `data: {"delta": ...}` 导致客户端挂起或超时的问题，内置自动解包、流式重组与合并机制，保证 JSON 模式在任何第三方中转站上稳定极速返回。
 - 对废弃模型、不可用模型追加更明确的配置提示
 
 运行时配置由 `src/config.js` 生成，支持：
@@ -151,6 +153,7 @@ PDF Special Path
 - 并发数覆盖
 - OpenRouter reasoning 开关
 - 术语表专用模型配置
+- 自定义 Base URL 与第三方中转站直连接入
 
 ### 6.2 批处理与重试
 
