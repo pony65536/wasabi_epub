@@ -1,6 +1,8 @@
 import Queue from "better-queue";
 import * as cheerio from "cheerio";
 import { cleanAIResponse } from "../utils.js";
+import { encodeInlineTags, decodeInlineTags } from "../content/inlineSlots.js";
+import { shouldTriggerCritic, reviewAndCorrectNode } from "../content/critic.js";
 
 const previewText = (text, maxLength = 300) => {
     const normalized = String(text ?? "").replace(/\s+/g, " ").trim();
@@ -63,9 +65,20 @@ export const createBatchQueue = (aiProvider, logger) => {
                     const mergeRegex =
                         /([A-Za-z])<(small|span|strong|em)[^>]*>([\s\S]*?)<\/\2>/gi;
 
+                    // 对每个节点的行内排版标签进行占位符安全编码
+                    const nodeSlotMetadata = new Map();
                     const batchInput =
                         batch.length === 1 && processor.singleNodePrompt
-                            ? batch[0].content
+                            ? (() => {
+                                  const preProcessed = batch[0].content.replace(
+                                      mergeRegex,
+                                      (match, p1, p2, p3) =>
+                                          !p3.includes("<") ? p1 + p3 : match,
+                                  );
+                                  const encoded = encodeInlineTags(preProcessed);
+                                  nodeSlotMetadata.set(batch[0].id, encoded);
+                                  return encoded.encodedText;
+                              })()
                             : batch
                                   .map((n) => {
                                       const preProcessedContent = n.content.replace(
@@ -73,7 +86,9 @@ export const createBatchQueue = (aiProvider, logger) => {
                                           (match, p1, p2, p3) =>
                                               !p3.includes("<") ? p1 + p3 : match,
                                       );
-                                      return `<node id="${n.id}">${preProcessedContent}</node>`;
+                                      const encoded = encodeInlineTags(preProcessedContent);
+                                      nodeSlotMetadata.set(n.id, encoded);
+                                      return `<node id="${n.id}">${encoded.encodedText}</node>`;
                                   })
                                   .join("\n");
 
@@ -114,49 +129,79 @@ export const createBatchQueue = (aiProvider, logger) => {
                                     isTranslationMetaNote(translatedPlainText) &&
                                     !isTranslationMetaNote(sourcePlainText)
                                 ) {
-                                    const metaNoteError = new Error(
-                                        `Node ${node.id} returned a translator meta note instead of translated content.`,
-                                    );
-                                    metaNoteError.responsePreview =
-                                        previewText(rawResponse);
-                                    throw metaNoteError;
-                                }
-                                updates.push({
-                                    nodeId: node.id,
-                                    processedContent: singleNodePlainTextFallback,
-                                });
-                                continue;
+                                const metaNoteError = new Error(
+                                    `Node ${node.id} returned a translator meta note instead of translated content.`,
+                                );
+                                metaNoteError.responsePreview =
+                                    previewText(rawResponse);
+                                throw metaNoteError;
                             }
-                            missingNodeIds.push(node.id);
+                            const slotInfo = nodeSlotMetadata.get(node.id);
+                            const restoredContent = slotInfo
+                                ? decodeInlineTags(
+                                      singleNodePlainTextFallback,
+                                      slotInfo.slotMap,
+                                      slotInfo.slotTag,
+                                  )
+                                : singleNodePlainTextFallback;
+                            updates.push({
+                                nodeId: node.id,
+                                processedContent: restoredContent,
+                            });
                             continue;
                         }
+                        missingNodeIds.push(node.id);
+                        continue;
+                    }
 
-                        const processedContent = $node.html()?.trim();
-                        if (!processedContent) {
-                            missingNodeIds.push(node.id);
-                            continue;
-                        }
+                    const processedContent = $node.html()?.trim();
+                    if (!processedContent) {
+                        missingNodeIds.push(node.id);
+                        continue;
+                    }
 
-                        const translatedPlainText = extractTextFromFragment(processedContent);
-                        const sourcePlainText = extractTextFromFragment(node.content);
-                        if (
-                            isTranslationMetaNote(translatedPlainText) &&
-                            !isTranslationMetaNote(sourcePlainText)
-                        ) {
-                            const metaNoteError = new Error(
-                                `Node ${node.id} returned a translator meta note instead of translated content.`,
-                            );
-                            metaNoteError.responsePreview = previewText(rawResponse);
-                            throw metaNoteError;
-                        }
+                    const translatedPlainText = extractTextFromFragment(processedContent);
+                    const sourcePlainText = extractTextFromFragment(node.content);
+                    if (
+                        isTranslationMetaNote(translatedPlainText) &&
+                        !isTranslationMetaNote(sourcePlainText)
+                    ) {
+                        const metaNoteError = new Error(
+                            `Node ${node.id} returned a translator meta note instead of translated content.`,
+                        );
+                        metaNoteError.responsePreview = previewText(rawResponse);
+                        throw metaNoteError;
+                    }
 
-                        try {
-                            cheerio.load(processedContent, { xmlMode: true });
-                            updates.push({ nodeId: node.id, processedContent });
-                        } catch (xmlError) {
-                            const invalidHtmlError = new Error(
-                                `Node ${node.id} invalid HTML: ${xmlError.message}`,
-                            );
+                    // 门控反思审查：若命中审校条件（如含有译者注 <ws-note> 或长度比例严重失衡），触发 Critic Agent 修正
+                    let finalContent = processedContent;
+                    if (shouldTriggerCritic(node.content, processedContent)) {
+                        finalContent = await reviewAndCorrectNode(
+                            node.content,
+                            processedContent,
+                            aiProvider,
+                            logger,
+                            processor.targetLanguage,
+                        );
+                    }
+
+                    // 解码占位符回填为真实出版级 HTML
+                    const slotInfo = nodeSlotMetadata.get(node.id);
+                    const restoredContent = slotInfo
+                        ? decodeInlineTags(
+                              finalContent,
+                              slotInfo.slotMap,
+                              slotInfo.slotTag,
+                          )
+                        : finalContent;
+
+                    try {
+                        cheerio.load(restoredContent, { xmlMode: true });
+                        updates.push({ nodeId: node.id, processedContent: restoredContent });
+                    } catch (xmlError) {
+                        const invalidHtmlError = new Error(
+                            `Node ${node.id} invalid HTML: ${xmlError.message}`,
+                        );
                             invalidHtmlError.responsePreview =
                                 previewText(rawResponse);
                             throw invalidHtmlError;

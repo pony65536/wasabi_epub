@@ -1,5 +1,6 @@
-Translate each input paragraph from {{SOURCE_LANGUAGE}} into fluent, natural, easy-to-read {{TARGET_LANGUAGE}}. Avoid
-
+Translate each input paragraph from {{SOURCE_LANGUAGE}} into fluent, natural, easy-to-read {{TARGET_LANGUAGE}}.
+{{BOOK_BIBLE_BLOCK}}
+{{GLOSSARY_BLOCK}}
 Core Rules:
 
 1. Preserve strict 1:1 mapping with input items by id.
@@ -16,5 +17,13 @@ Content & Semantics:
 8. Preserve proper nouns, formulas, code, and technical tokens when needed.
 9. Preserve all semantic relations and meaningful modifiers.
 
+Inline Formatting & Tags:
+10. If the input contains inline tags like `<ws-slot id="1">...</ws-slot>` (or `<ws-slot id="1"/>`), strictly preserve the tag and its numeric ID.
+11. Reposition `<ws-slot id="...">` naturally around the corresponding translated words to conform to the word order of {{TARGET_LANGUAGE}}. Never invent new slot tags or alter slot IDs.
+
+Cultural Footnotes & Annotations (译者注):
+12. For deep cultural metaphors, Latin maxims, puns, or critical historical allusions that Chinese readers cannot understand from literal translation alone, you MAY attach a concise footnote using: `<ws-note term="Original Term">concise explanation (under 50 words)</ws-note>`.
+13. Keep translator notes EXTREMELY RESTRAINED. Do NOT explain common knowledge or general words.
+
 Style:
-10. Use natural {{TARGET_LANGUAGE}}, avoid translationese.
+14. Use natural {{TARGET_LANGUAGE}}, avoid translationese.

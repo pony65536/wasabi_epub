@@ -18,6 +18,8 @@ import { selectChaptersBySpec } from "./support/chapterSelection.js";
 import { callAIWithRetry, extractFirstHeading, loadHtml } from "./utils.js";
 import { createBatchQueue } from "./translation/batchQueue.js";
 import { planTranslationOrder } from "./agent.js";
+import { runDirectorAgent } from "./content/director.js";
+import { LivingMemoryStore } from "./content/memory.js";
 import {
     analyzeHeadingFormats,
     standardizeHeadingsByRules,
@@ -630,6 +632,7 @@ export const runTranslationJob = async ({
     console.log(`========================================\n`);
 
     let completed = false;
+    let shouldKeepArtifacts = debugMode;
 
     try {
         const zip = new AdmZip(inputPath);
@@ -641,12 +644,31 @@ export const runTranslationJob = async ({
         let plan = { sorted: [], tocId: null };
         let headingFormatRules = [];
         let glossary = {};
+        let bookBible = null;
         let ncxEntry = null;
         let ncxContent = null;
 
+        const cachedBookBible = cache.loadBookBible();
         const cachedPlan = cache.loadPlan();
         const cachedGlossary = cache.loadGlossary();
         const cachedHeadingRules = cache.loadHeadingRules();
+
+        if (cachedBookBible) {
+            console.log("\n🎬 Step 0: Loading Book Bible from cache...");
+            bookBible = cachedBookBible;
+        } else {
+            bookBible = await runDirectorAgent(
+                [...chapterMap.values()],
+                aiProvider,
+                logger,
+                runtimeConfig,
+            );
+            if (bookBible) {
+                cache.saveBookBible(bookBible);
+            }
+        }
+
+        const livingMemoryStore = new LivingMemoryStore(bookBible, cache);
 
         if (cachedPlan) {
             console.log("\n🕵️ Step 1: Loading translation plan from cache...");
@@ -716,6 +738,13 @@ export const runTranslationJob = async ({
                 logger,
                 runtimeConfig,
             );
+            // 将 Director Agent 提取的特定世界观/术语合并入 glossary
+            if (bookBible?.worldviewAndGlossary) {
+                glossary = {
+                    ...bookBible.worldviewAndGlossary,
+                    ...glossary,
+                };
+            }
             cache.saveGlossary(glossary);
         }
 
@@ -745,7 +774,11 @@ export const runTranslationJob = async ({
             definedClasses,
             "epub",
             debugMode,
-            epubStructuralMode,
+            {
+                ...epubStructuralMode,
+                bookBible,
+                livingMemoryStore,
+            },
         );
 
         await batchQueue.drainQueue();
@@ -842,6 +875,7 @@ export const runHtmlTranslationJob = async ({
     console.log(`========================================\n`);
 
     let completed = false;
+    let shouldKeepArtifacts = debugMode;
 
     try {
         const chapterMap = createSingleHtmlChapterMap(inputPath);

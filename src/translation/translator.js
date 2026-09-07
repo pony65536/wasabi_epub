@@ -14,6 +14,9 @@ import {
     classifyNode,
     normalizeText,
 } from "../content/content-classifier.js";
+import { formatBookBibleForPrompt } from "../content/director.js";
+import { extractAndFormatNotes, appendFootnotesSection } from "../content/footnotes.js";
+import { extractChapterMemory } from "../content/memory.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -1139,6 +1142,7 @@ const enqueueChapterTranslation = (
 
     const makeProcessor = () => ({
         attrName: "data-t-id",
+        targetLanguage: translationConfig.targetLanguage,
         prompt: (batchNodes) => {
             const batchText = batchNodes
                 .map((n) => n.content)
@@ -1156,6 +1160,9 @@ const enqueueChapterTranslation = (
             const promptTemplate = getTranslationPromptTemplate(
                 translationMode,
             );
+            const bookBibleMarkdown = chapterTranslationOptions?.bookBible
+                ? formatBookBibleForPrompt(chapterTranslationOptions.bookBible)
+                : "";
             return promptTemplate.replace(
                 "{{TARGET_LANGUAGE}}",
                 translationConfig.targetLanguage,
@@ -1165,6 +1172,7 @@ const enqueueChapterTranslation = (
                     translationConfig.sourceLanguage,
                 )
                 .replace("{{CHAPTER_TITLE}}", chapterTitle)
+                .replace("{{BOOK_BIBLE_BLOCK}}", bookBibleMarkdown)
                 .replace("{{GLOSSARY_BLOCK}}", glossaryMarkdown)
                 .replace(
                     "{{STYLE_GUIDE}}",
@@ -1337,6 +1345,22 @@ const enqueueChapterTranslation = (
                 `    - ⏭️ Skipped translation for ${skippedNodeCount} classified node(s); original content preserved.`,
             );
         }
+
+        // EPUB 模式下：提取并格式化译者注，挂载 EPUB 3 脚注区
+        if (translationMode === "epub") {
+            const chapterNotes = [];
+            $("p, li, h1, h2, h3, h4, h5, h6, caption").each((_, el) => {
+                const inner = $(el).html();
+                if (inner && inner.includes("<ws-note")) {
+                    $(el).html(extractAndFormatNotes(inner, chapterNotes, chapterTitle));
+                }
+            });
+            if (chapterNotes.length > 0) {
+                console.log(`    - 📑 [${chapterTitle}] Embedded ${chapterNotes.length} cultural footnote(s) (<aside epub:type="footnote">).`);
+                return appendFootnotesSection($.xml(), chapterNotes);
+            }
+        }
+
         return $.xml();
     });
 };
@@ -1427,7 +1451,10 @@ export const performTranslation = async (
             definedClasses,
             translationMode,
             debugMode,
-            bookTranslationOptions?.chapterModes?.[ch.id] || {},
+            {
+                ...(bookTranslationOptions?.chapterModes?.[ch.id] || {}),
+                bookBible: bookTranslationOptions?.bookBible,
+            },
         );
 
         // 每章独立 then：完成后立即写 cache，不等其他章节
@@ -1439,6 +1466,18 @@ export const performTranslation = async (
                     console.log(
                         `✅ [${index + 1}/${total}] Done: "${ch.title}"`,
                     );
+
+                    // 异步触发增量记忆提取 (Living Memory Extractor)
+                    if (bookTranslationOptions?.livingMemoryStore) {
+                        extractChapterMemory(
+                            translatedHtml,
+                            bookTranslationOptions.livingMemoryStore,
+                            aiProvider,
+                            logger,
+                            translationConfig,
+                            ch.title,
+                        );
+                    }
                 }
             })
             .catch((e) => {

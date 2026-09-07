@@ -123,6 +123,21 @@ const buildProviderClient = (providerName, config) => {
                 ...(forceJson && { response_format: { type: "json_object" } }),
             };
             const completion = await client.chat.completions.create(options);
+            // 兼容某些第三方中转站当传入 response_format 时强行返回 SSE string 的情况
+            if (typeof completion === "string") {
+                const chunks = [];
+                for (const line of completion.split("\n")) {
+                    const trimmed = line.trim();
+                    if (!trimmed.startsWith("data:") || trimmed === "data: [DONE]") continue;
+                    try {
+                        const parsed = JSON.parse(trimmed.slice(5).trim());
+                        const content = parsed.choices?.[0]?.delta?.content || parsed.choices?.[0]?.message?.content || "";
+                        if (content) chunks.push(content);
+                    } catch {}
+                }
+                if (chunks.length > 0) return chunks.join("").trim();
+                return completion.trim();
+            }
             return completion.choices[0].message.content.trim();
         };
     }

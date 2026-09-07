@@ -97,7 +97,7 @@ PDF Special Path
 
 `src/core.js` 是系统的主调度器，暴露四类入口：
 
-- `runTranslationJob`：EPUB
+- `runTranslationJob`：EPUB（含 Step 0 Director Agent 全书导演先导、TOC 排序、规则分析、术语表提取、并发翻译、排版修复与最终打包）
 - `runHtmlTranslationJob`：HTML
 - `runPdfTranslationJob`：PDF
 - `runSubtitleTranslationJob`：SRT / 视频字幕
@@ -106,9 +106,32 @@ PDF Special Path
 
 - 建立 `input/`、`output/`、`log/`、`.cache_*`
 - 创建 logger、provider、batch queue、cache
-- 决定是否复用缓存
+- 决定是否复用缓存（包含 Book Bible、Plan、Glossary、Heading 规则）
 - 串联术语生成、正文翻译、后处理、输出保存
 - 结束后根据 `--debug` 决定是否清理缓存和日志
+
+### 5.4 智能体驱动与排版保护架构（Agentic Workflow & Inline Slots）
+
+系统针对长篇长文档图书翻译引入了**分层多智能体协同（Autonomous Translation Studio）与行内排版占位符系统**：
+
+1. **全书导演（Director Agent, `src/content/director.js`）**：
+   - 处于 EPUB 主流程的 **Step 0**。在全书动工前，分层抽样全书骨架（跳过封面、TOC、版权等非实质页），一次性萃取全书的文体风格（Tone）、角色表与人称代词（Character Bible，杜绝男女代词乱飘）、世界观核心专有名词（Worldview）。
+   - 产物结构化持久化至 `.cache/book_bible.json`，供人工二次审核或断点续跑，并作为全局约束动态挂载注入所有批次翻译 Prompt。
+2. **动态生长记忆中枢（Living Memory Store, `src/content/memory.js`）**：
+   - 取代原有死板的词频统计词表，在每章翻译完成后由 Extractor Agent 异步提炼本章新出现的人物变迁、专有名词与统一称谓。
+   - 自动去重合并入 Book Bible 快照，实现全书跨章节“越翻越准、前后呼应”的自生长记忆体系。
+3. **门控反思审校智能体（Gated Critic Agent, `src/content/critic.js`）**：
+   - 解决单次成稿（Single-pass）造成的漏译与生硬直译。
+   - 采用**门禁机制（Gating）**节约 70% 额外开销：仅当检测到初译文本包含【译者注】、长句漏译嫌疑（长度比异常失衡）或生硬直译时激活审查与定向纠错重写。
+4. **文化特异性与 EPUB 3 弹窗译者注（Cultural Annotations & Footnotes, `src/content/footnotes.js`）**：
+   - 针对双关语、典故、拉丁文格言等文化隔阂，引导模型生成轻量 `<ws-note term="...">`。
+   - 由装配器转换为标准 EPUB 3 脚注语义（`<aside epub:type="footnote">`），在微信读书、Apple Books 等现代阅读器中实现**点击角标原生弹窗浮层阅读**，阅读体验比肩正规出版物。
+5. **前文上下文轻量回溯检索器（Context Retriever, `src/content/retriever.js`）**：
+   - 维护已翻译章节的倒排段落索引，遇到长距离代词迷雾或剧情伏笔时支持即时检索前文线索。
+6. **行内排版占位符架构（Inline Tag Placeholders, `src/content/inlineSlots.js`）**：
+   - 解决大模型面对复杂行内标签（`<a>`, `<em>`, `<strong>`, `<sup>` 等）时容易篡改 URL、丢失属性或在中文倒装语序中打乱闭合的顽疾。
+   - **独占命名空间与 Nonce 探针**：采用 `<ws-slot id="N">` 格式，检测到正文代码冲突时自动加盐升版；
+   - **白名单查表还原与容错**：只认当前批次发出的 slot ID，正文类似文本原样不动；递归内层优先解码，自动修复漏闭合标签。
 
 ## 6. 翻译引擎
 

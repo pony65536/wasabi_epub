@@ -36,7 +36,24 @@ export const createProgressCache = (cacheDir) => {
     const count = () =>
         fs.readdirSync(cacheDir).filter((f) => f.endsWith(".html")).length;
 
-    // ===== 新增：保存/加载翻译计划、术语表、标题规则 =====
+    // ===== 新增：保存/加载翻译计划、术语表、标题规则、Book Bible =====
+    const saveBookBible = (bible) => {
+        const file = path.join(cacheDir, "book_bible.json");
+        fs.writeFileSync(file, JSON.stringify(bible, null, 2), "utf8");
+    };
+
+    const loadBookBible = () => {
+        const file = path.join(cacheDir, "book_bible.json");
+        if (fs.existsSync(file)) {
+            try {
+                return JSON.parse(fs.readFileSync(file, "utf8"));
+            } catch {
+                return null;
+            }
+        }
+        return null;
+    };
+
     const savePlan = (plan) => {
         const file = path.join(cacheDir, "translation_plan.json");
         fs.writeFileSync(file, JSON.stringify(plan, null, 2), "utf8");
@@ -94,6 +111,8 @@ export const createProgressCache = (cacheDir) => {
         loadGlossary,
         saveHeadingRules,
         loadHeadingRules,
+        saveBookBible,
+        loadBookBible,
         hasAnyCache,
         removeDir,
     };

@@ -17,5 +17,9 @@ Content & Semantics:
 9. Preserve proper nouns, formulas, code, and technical tokens when needed.
 10. Preserve all semantic relations and meaningful modifiers.
 
+Inline Formatting & Tags:
+11. If the input contains inline tags like `<ws-slot id="1">...</ws-slot>` (or `<ws-slot id="1"/>`), strictly preserve the tag and its numeric ID.
+12. Reposition `<ws-slot id="...">` naturally around the corresponding translated words to conform to the word order of {{TARGET_LANGUAGE}}. Never invent new slot tags or alter slot IDs.
+
 Style:
-11. Use natural {{TARGET_LANGUAGE}}, avoid translationese.
+13. Use natural {{TARGET_LANGUAGE}}, avoid translationese.
