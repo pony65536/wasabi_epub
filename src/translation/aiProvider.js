@@ -1,5 +1,6 @@
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import OpenAI from "openai";
+import { createRequestLimiter } from "./requestLimiter.js";
 
 export const isContentPolicyError = (err) => {
     const message = String(err?.message || "").toLowerCase();
@@ -27,6 +28,57 @@ export const isContentPolicyError = (err) => {
     ];
 
     return !excludedSignals.some((token) => message.includes(token));
+};
+
+export const classifyProviderError = (error) => {
+    const message = String(error?.message || "").toLowerCase();
+    const status = Number(error?.status || error?.response?.status || 0);
+
+    if (error?.code === "ETIMEDOUT" || message.includes("timed out")) {
+        return { category: "timeout", retryable: true };
+    }
+    if (
+        status === 401 ||
+        status === 403 ||
+        message.includes("unauthorized") ||
+        message.includes("invalid api key") ||
+        message.includes("api key")
+    ) {
+        return { category: "auth", retryable: false };
+    }
+    if (status === 429 || message.includes("rate limit")) {
+        return { category: "rate_limit", retryable: true };
+    }
+    if (
+        message.includes("deprecated") ||
+        message.includes("decommissioned") ||
+        message.includes("no longer available") ||
+        message.includes("model not found") ||
+        message.includes("unknown model")
+    ) {
+        return { category: "model_missing", retryable: false };
+    }
+    if (
+        message.includes("econnreset") ||
+        message.includes("socket hang up") ||
+        message.includes("fetch failed") ||
+        message.includes("network")
+    ) {
+        return { category: "network", retryable: true };
+    }
+    if (
+        message.includes("invalid json") ||
+        message.includes("missing or empty nodes") ||
+        message.includes("slot integrity") ||
+        message.includes("protected structure") ||
+        message.includes("invalid html")
+    ) {
+        return { category: "format", retryable: true };
+    }
+    if (isContentPolicyError(error)) {
+        return { category: "content_policy", retryable: true };
+    }
+    return { category: "unknown", retryable: true };
 };
 
 const buildDeprecatedModelGuidance = (client, err) => {
@@ -65,7 +117,7 @@ const buildDeprecatedModelGuidance = (client, err) => {
     ].join("\n");
 };
 
-const withTimeout = async (promise, timeoutMs, timeoutLabel) => {
+const withTimeout = async (promise, timeoutMs, timeoutLabel, onTimeout) => {
     if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
         return await promise;
     }
@@ -80,6 +132,9 @@ const withTimeout = async (promise, timeoutMs, timeoutLabel) => {
                         `${timeoutLabel} timed out after ${timeoutMs}ms`,
                     );
                     error.code = "ETIMEDOUT";
+                    try {
+                        onTimeout?.();
+                    } catch {}
                     reject(error);
                 }, timeoutMs);
             }),
@@ -112,7 +167,8 @@ const buildProviderClient = (providerName, config) => {
             baseURL: providerConfig.baseURL,
             timeout: providerConfig.timeoutMs,
         });
-        _callRaw = async (systemInstruction, userContent, forceJson) => {
+        _callRaw = async (systemInstruction, userContent, forceJson, requestOptions = {}) => {
+            const { signal, ...bodyOptions } = requestOptions;
             const options = {
                 model: providerConfig.modelName,
                 messages: [
@@ -122,17 +178,28 @@ const buildProviderClient = (providerName, config) => {
                 ...(providerConfig.requestOptions || {}),
                 ...(forceJson && { response_format: { type: "json_object" } }),
             };
-            const completion = await client.chat.completions.create(options);
+            // signal 必须作为请求选项传入（第二参数），不能混进请求正文
+            const completion = await client.chat.completions.create(
+                options,
+                signal ? { signal } : undefined,
+            );
             // 兼容某些第三方中转站当传入 response_format 时强行返回 SSE string 的情况
             if (typeof completion === "string") {
+                // 防御性上限：异常巨大的字符串直接返回，不做 SSE 解析
+                if (completion.length > 10 * 1024 * 1024) {
+                    return completion.trim();
+                }
                 const chunks = [];
                 for (const line of completion.split("\n")) {
                     const trimmed = line.trim();
                     if (!trimmed.startsWith("data:") || trimmed === "data: [DONE]") continue;
                     try {
                         const parsed = JSON.parse(trimmed.slice(5).trim());
-                        const content = parsed.choices?.[0]?.delta?.content || parsed.choices?.[0]?.message?.content || "";
-                        if (content) chunks.push(content);
+                        const content =
+                            parsed?.choices?.[0]?.delta?.content ||
+                            parsed?.choices?.[0]?.message?.content ||
+                            "";
+                        if (typeof content === "string" && content) chunks.push(content);
                     } catch {}
                 }
                 if (chunks.length > 0) return chunks.join("").trim();
@@ -166,6 +233,8 @@ export const createAIProvider = (
     const fallbackClient = shouldEnableFallback
         ? buildProviderClient(fallbackProviderName, config)
         : null;
+    // 正文与辅助请求共用同一个限流器，避免辅助调用绕过并发上限
+    const requestLimiter = createRequestLimiter(primaryClient.concurrency || 4);
 
     const callWithClient = async (
         client,
@@ -178,14 +247,19 @@ export const createAIProvider = (
             `PROVIDER: ${client.providerName}\nMODEL: ${client.modelName}\nTIMEOUT_MS: ${client.providerConfig.timeoutMs ?? "none"}\nSYSTEM:\n${systemInstruction}\n\nUSER:\n${userContent}`,
         );
         const startedAt = Date.now();
-        const responseText = await withTimeout(
-            client.callRaw(
-                systemInstruction,
-                userContent,
-                forceJsonMode,
+        const controller = new AbortController();
+        const responseText = await requestLimiter.run(() =>
+            withTimeout(
+                client.callRaw(
+                    systemInstruction,
+                    userContent,
+                    forceJsonMode,
+                    { signal: controller.signal },
+                ),
+                client.providerConfig.timeoutMs,
+                `${client.providerName}:${client.modelName}`,
+                () => controller.abort(),
             ),
-            client.providerConfig.timeoutMs,
-            `${client.providerName}:${client.modelName}`,
         );
         logger.write(
             "RESPONSE",
@@ -254,5 +328,9 @@ export const createAIProvider = (
         modelName: primaryClient.modelName,
         providerName: primaryClient.providerName,
         fallbackProviderName: fallbackClient?.providerName ?? null,
+        getLimiterStats: () => ({
+            active: requestLimiter.active,
+            pending: requestLimiter.pending,
+        }),
     };
 };

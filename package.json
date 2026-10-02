@@ -1,7 +1,8 @@
 {
-    "main": "bot.js",
+    "main": "index.js",
     "type": "module",
     "scripts": {
+        "test": "node tests/run_all.mjs",
         "pdf:install": "node index.js setup --pdf"
     },
     "dependencies": {

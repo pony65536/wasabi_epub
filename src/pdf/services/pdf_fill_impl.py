@@ -424,7 +424,7 @@ def fill_pdf_preserving_graphics(
     input_pdf: str,
     translated_json: str,
     output_pdf: str,
-) -> None:
+) -> str:
     fitz = common.require_fitz()
     overall_started = time.perf_counter()
     final_output_pdf = output_pdf
@@ -607,3 +607,4 @@ def fill_pdf_preserving_graphics(
         f"elapsed={time.perf_counter() - overall_started:.2f}s",
         flush=True,
     )
+    return str(final_output_pdf)

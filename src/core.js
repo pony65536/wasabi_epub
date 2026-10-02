@@ -13,8 +13,19 @@ import {
 } from "./config.js";
 import { createLogger } from "./support/logger.js";
 import { createAIProvider } from "./translation/aiProvider.js";
-import { createProgressCache } from "./support/cache.js";
+import {
+    buildJobResult,
+    createJobCache,
+    finalizeJobArtifacts,
+} from "./support/jobRuntime.js";
+import {
+    buildTaskSignature,
+    computeFileDigest,
+    computePromptDigest,
+    computeTextDigest,
+} from "./support/taskIdentity.js";
 import { selectChaptersBySpec } from "./support/chapterSelection.js";
+import { moveFileIfNeeded } from "./support/archive.js";
 import { callAIWithRetry, extractFirstHeading, loadHtml } from "./utils.js";
 import { createBatchQueue } from "./translation/batchQueue.js";
 import { planTranslationOrder } from "./agent.js";
@@ -22,13 +33,25 @@ import { runDirectorAgent } from "./content/director.js";
 import { LivingMemoryStore } from "./content/memory.js";
 import { repairChapterMapInPlace } from "./epub/epubDoctor.js";
 import {
+    buildLinkContext,
+    rewriteInternalLinks,
+    validateInternalLinks,
+    validateNcxLinks,
+} from "./epub/linkRewriter.js";
+import {
     analyzeHeadingFormats,
     standardizeHeadingsByRules,
 } from "./content/headings.js";
 import { generateInitialGlossary } from "./content/glossary.js";
 import {
+    EXCLUDED_ROLES,
+    classifyChapterRole,
+} from "./content/chapterRoles.js";
+import { ContextRetriever } from "./content/retriever.js";
+import {
     collectVisibleTextNodes,
     detectEpubBookStructuralMode,
+    mergeTranslationReports,
     performTranslation,
 } from "./translation/translator.js";
 import { synchronizeTocHtml, synchronizeNcx } from "./epub/tocSync.js";
@@ -40,7 +63,7 @@ import {
 } from "./pdf/pdfBridge.js";
 import { applyTranslatedHtmlToPdfJson, pdfJsonToHtml } from "./pdf/pdfHtml.js";
 import { applyTranslatedHtmlToSubtitleJson, buildSubtitleJson, parseSrt, serializeSrt, subtitleJsonToHtml } from "./subtitle/srt.js";
-import { convertExternalSubtitleToSrt, detectExternalSubtitleFiles, extractSubtitleStreamToSrt, inferSubtitleLanguageFromFile, muxTranslatedSubtitleIntoVideo, probeSubtitleStreams, selectSubtitleStream, assertSubtitleCodecSupported } from "./subtitle/video.js";
+import { convertExternalSubtitleToSrt, detectExternalSubtitleFiles, extractSubtitleStreamToSrt, inferSubtitleLanguageFromFile, isSubtitleCodecSupported, muxTranslatedSubtitleIntoVideo, probeSubtitleStreams, selectSubtitleStream, assertSubtitleCodecSupported } from "./subtitle/video.js";
 
 const sanitizeFileToken = (value) =>
     value.replace(/['"]/g, "").replace(/[<>:"/\\|?*\s]+/g, "_");
@@ -67,11 +90,52 @@ const getLanguageFileCode = (languageName) => {
     );
 };
 
-const countCachedChapters = (cache, chapters) =>
-    chapters.reduce(
-        (count, chapter) => count + (cache.load(chapter.id) ? 1 : 0),
-        0,
-    );
+const countCachedChapters = (cache, chapters) => {
+    const statusMap = cache.loadChapterStatus();
+    return chapters.reduce((count, chapter) => {
+        const cached = cache.load(chapter.id);
+        if (!cached) return count;
+        const verifiedComplete =
+            statusMap[chapter.id]?.status === "complete" &&
+            !/data-t-id\s*=/.test(cached);
+        return count + (verifiedComplete ? 1 : 0);
+    }, 0);
+};
+
+const ensureCacheIdentity = (cache, signature, details, logger) => {
+    const existing = cache.loadTaskMeta();
+    const hasArtifacts =
+        cache.count() > 0 ||
+        Boolean(cache.loadPlan()) ||
+        Boolean(cache.loadGlossary()) ||
+        Object.keys(cache.loadChapterStatus()).length > 0;
+
+    if (!existing?.signature && hasArtifacts) {
+        // 已有缓存但缺少任务签名：进入显式迁移，不直接赋予新身份
+        logger.write(
+            "WARN",
+            "Unverified cache without task signature; clearing to avoid stale reuse.",
+        );
+        console.log(
+            "\n♻️ Unverified cache without task identity; clearing it.",
+        );
+        cache.clear();
+    } else if (existing?.signature && existing.signature !== signature) {
+        logger.write(
+            "WARN",
+            `Cache task identity mismatch (${existing.signature} -> ${signature}); clearing stale cache.`,
+        );
+        console.log(
+            "\n♻️ Cache belongs to a different translation task; clearing it.",
+        );
+        cache.clear();
+    }
+    cache.saveTaskMeta({
+        signature,
+        ...details,
+        updatedAt: new Date().toISOString(),
+    });
+};
 
 const PDF_BLOCKS_SCHEMA_VERSION = 2;
 const PDF_REPAIR_MAX_RUN = 4;
@@ -357,33 +421,6 @@ const ensureDir = (dirPath) => {
     }
 };
 
-const moveFileIfNeeded = (sourcePath, targetPath) => {
-    const resolvedSource = path.resolve(sourcePath);
-    const resolvedTarget = path.resolve(targetPath);
-    if (resolvedSource === resolvedTarget) return;
-    ensureDir(path.dirname(resolvedTarget));
-    if (fs.existsSync(resolvedTarget)) {
-        fs.unlinkSync(resolvedTarget);
-    }
-    try {
-        fs.renameSync(resolvedSource, resolvedTarget);
-        return;
-    } catch (error) {
-        if (!["EPERM", "EXDEV", "EBUSY"].includes(error?.code)) {
-            throw error;
-        }
-    }
-
-    fs.copyFileSync(resolvedSource, resolvedTarget);
-    try {
-        fs.unlinkSync(resolvedSource);
-    } catch {
-        console.warn(
-            `⚠️  Source file could not be removed after copying to input: ${path.basename(resolvedSource)}`,
-        );
-    }
-};
-
 const collectReferencedIds = (chapterMap) => {
     const referencedIds = new Set();
     for (const chapter of chapterMap.values()) {
@@ -466,6 +503,7 @@ const createChapterMap = (zipEntries) => {
         xmlMode: true,
     });
 
+    const manifestChapters = new Map();
     $opf("[media-type='application/xhtml+xml']").each((_, el) => {
         const item = {
             id: $opf(el).attr("id"),
@@ -487,9 +525,27 @@ const createChapterMap = (zipEntries) => {
         };
 
         if (chapter.entryName) {
-            chapterMap.set(chapter.id, chapter);
+            manifestChapters.set(chapter.id, chapter);
         }
     });
+
+    // 阅读顺序以 OPF spine 为准（manifest 顺序可能不同），spine 未覆盖的条目追加在后
+    const spineIds = [];
+    $opf("spine itemref").each((_, el) => {
+        const idref = $opf(el).attr("idref");
+        if (idref) spineIds.push(idref);
+    });
+
+    const remaining = new Map(manifestChapters);
+    for (const idref of spineIds) {
+        const chapter = remaining.get(idref);
+        if (!chapter) continue;
+        chapterMap.set(chapter.id, chapter);
+        remaining.delete(idref);
+    }
+    for (const chapter of remaining.values()) {
+        chapterMap.set(chapter.id, chapter);
+    }
 
     return chapterMap;
 };
@@ -606,10 +662,10 @@ export const runTranslationJob = async ({
     const cacheDir = path.resolve(
         projectRoot,
         chapterSelector
-            ? `.cache_${fileInfo.name}_chap-${selectionSlug}`
-            : `.cache_${fileInfo.name}`,
+            ? `.cache_${fileInfo.name}_${targetLanguageSlug}_chap-${selectionSlug}`
+            : `.cache_${fileInfo.name}_${targetLanguageSlug}`,
     );
-    const cache = createProgressCache(cacheDir);
+    const cache = createJobCache(cacheDir);
 
     console.log(`\n========================================`);
     console.log(`📖 Input:  ${path.basename(inputPath)}`);
@@ -634,6 +690,7 @@ export const runTranslationJob = async ({
 
     let completed = false;
     let shouldKeepArtifacts = debugMode;
+    let translationStatus = "complete";
 
     try {
         const zip = new AdmZip(inputPath);
@@ -641,7 +698,31 @@ export const runTranslationJob = async ({
         const chapterMap = createChapterMap(zipEntries);
 
         // 🩺 内存级就地体检与重构：针对非标/超大单文件假章节进行智能切分
-        repairChapterMapInPlace(chapterMap, logger);
+        const repairReport = repairChapterMapInPlace(chapterMap, logger, {
+            zipEntries,
+        });
+        const repairFingerprint = repairReport.fingerprint;
+        const epubTaskSignature = buildTaskSignature({
+            kind: "epub",
+            sourceDigest: repairReport.sourceDigest,
+            sourceLanguage: runtimeConfig.sourceLanguage,
+            targetLanguage: runtimeConfig.targetLanguage,
+            extras: {
+                repairFingerprint,
+                promptDigest: computePromptDigest(
+                    projectRoot,
+                    "epub_translation_prompt.txt",
+                ),
+                chapterSelector: chapterSelector || null,
+            },
+        });
+        ensureCacheIdentity(
+            cache,
+            epubTaskSignature,
+            { kind: "epub", repairFingerprint },
+            logger,
+        );
+        cache.saveRepairFingerprint(repairFingerprint);
 
         const referencedIds = collectReferencedIds(chapterMap);
         const definedClasses = collectDefinedClasses(zipEntries);
@@ -658,12 +739,40 @@ export const runTranslationJob = async ({
         const cachedGlossary = cache.loadGlossary();
         const cachedHeadingRules = cache.loadHeadingRules();
 
+        // 先规划（确定角色/阅读顺序），再抽样运行 Director，只喂正文
+        if (cachedPlan) {
+            console.log("\n🕵️ Step 1: Loading translation plan from cache...");
+            plan = sanitizeCachedPlan(cachedPlan, chapterMap, logger) || cachedPlan;
+            cache.savePlan({ ...plan, repairFingerprint });
+            if (plan.tocId) {
+                const tocChapter = chapterMap.get(plan.tocId);
+                if (tocChapter) tocChapter.isTOC = true;
+            }
+        } else {
+            plan = await planTranslationOrder(
+                [...chapterMap.values()],
+                aiProvider,
+                logger,
+            );
+            cache.savePlan({ ...plan, repairFingerprint });
+        }
+
         if (cachedBookBible) {
             console.log("\n🎬 Step 0: Loading Book Bible from cache...");
             bookBible = cachedBookBible;
         } else {
+            const roleOfChapter = (chapter) =>
+                plan.roles?.[chapter.id] || classifyChapterRole(chapter);
+            const directorChapters = plan.sorted.filter(
+                (chapter) =>
+                    !chapter.isTOC &&
+                    !EXCLUDED_ROLES.has(roleOfChapter(chapter)) &&
+                    roleOfChapter(chapter) !== "front",
+            );
             bookBible = await runDirectorAgent(
-                [...chapterMap.values()],
+                directorChapters.length > 0
+                    ? directorChapters
+                    : [...chapterMap.values()],
                 aiProvider,
                 logger,
                 runtimeConfig,
@@ -675,25 +784,27 @@ export const runTranslationJob = async ({
 
         const livingMemoryStore = new LivingMemoryStore(bookBible, cache);
 
-        if (cachedPlan) {
-            console.log("\n🕵️ Step 1: Loading translation plan from cache...");
-            plan = sanitizeCachedPlan(cachedPlan, chapterMap, logger) || cachedPlan;
-            cache.savePlan(plan);
-            if (plan.tocId) {
-                const tocChapter = chapterMap.get(plan.tocId);
-                if (tocChapter) tocChapter.isTOC = true;
-            }
-        } else {
-            plan = await planTranslationOrder(
-                [...chapterMap.values()],
-                aiProvider,
-                logger,
-            );
-            cache.savePlan(plan);
-        }
+        const roleOf = (chapter) =>
+            plan.roles?.[chapter.id] || classifyChapterRole(chapter);
 
+        // 阅读顺序（spine）中的可翻译章节，作为 --chap 编号基准，与 AI 重排无关
+        const readingOrderChapters = [...chapterMap.values()].filter(
+            (chapter) =>
+                !chapter.isTOC && !EXCLUDED_ROLES.has(roleOf(chapter)),
+        );
         const selectedChapters = chapterSelector
-            ? selectChaptersBySpec(plan.sorted, chapterSelector)
+            ? (() => {
+                  const selected = selectChaptersBySpec(
+                      readingOrderChapters,
+                      chapterSelector,
+                  );
+                  const selectedIds = new Set(
+                      selected.map((chapter) => chapter.id),
+                  );
+                  return plan.sorted.filter((chapter) =>
+                      selectedIds.has(chapter.id),
+                  );
+              })()
             : plan.sorted;
         const selectedChapterMap = new Map(
             selectedChapters.map((chapter) => [
@@ -766,27 +877,88 @@ export const runTranslationJob = async ({
             );
         }
 
-        await performTranslation(
-            selectedChapters,
-            chapterMap,
-            glossary,
-            runtimeConfig,
-            aiProvider,
-            batchQueue,
-            logger,
-            cache,
-            referencedIds,
-            definedClasses,
-            "epub",
-            debugMode,
-            {
-                ...epubStructuralMode,
-                bookBible,
-                livingMemoryStore,
-            },
+        const contextRetriever = new ContextRetriever();
+        const translationOptions = {
+            ...epubStructuralMode,
+            bookBible,
+            livingMemoryStore,
+            contextRetriever,
+        };
+
+        // 阶段化调度：正文优先（积累记忆与术语），前置材料最后
+        const contentChapters = selectedChapters.filter(
+            (chapter) => roleOf(chapter) !== "front",
+        );
+        const frontChapters = selectedChapters.filter(
+            (chapter) => roleOf(chapter) === "front",
         );
 
+        const phaseReports = [];
+        if (contentChapters.length > 0) {
+            phaseReports.push(
+                await performTranslation(
+                    contentChapters,
+                    chapterMap,
+                    glossary,
+                    runtimeConfig,
+                    aiProvider,
+                    batchQueue,
+                    logger,
+                    cache,
+                    referencedIds,
+                    definedClasses,
+                    "epub",
+                    debugMode,
+                    translationOptions,
+                ),
+            );
+        }
+
+        // 将正文阶段沉淀的动态术语并入 glossary，供前言阶段使用
+        if (frontChapters.length > 0) {
+            const snapshot = livingMemoryStore?.getSnapshot?.();
+            const dynamicGlossary = snapshot?.worldviewAndGlossary || {};
+            if (Object.keys(dynamicGlossary).length > 0) {
+                glossary = { ...dynamicGlossary, ...glossary };
+                cache.saveGlossary(glossary);
+                console.log(
+                    `  🧠 Merged ${Object.keys(dynamicGlossary).length} memory term(s) into glossary for front-matter phase.`,
+                );
+            }
+            phaseReports.push(
+                await performTranslation(
+                    frontChapters,
+                    chapterMap,
+                    glossary,
+                    runtimeConfig,
+                    aiProvider,
+                    batchQueue,
+                    logger,
+                    cache,
+                    referencedIds,
+                    definedClasses,
+                    "epub",
+                    debugMode,
+                    translationOptions,
+                ),
+            );
+        }
+
+        const translationReport = mergeTranslationReports(phaseReports);
+        translationStatus = translationReport.status;
+
         await batchQueue.drainQueue();
+
+        if (translationStatus === "failed") {
+            throw new Error(
+                "Translation failed for every pending chapter. Cache retained for resume.",
+            );
+        }
+        if (translationStatus === "partial") {
+            console.log(
+                `\n⚠️ Partial translation: ${translationReport.partialChapters.length} chapter(s) have unresolved nodes. Cache retained; rerun to resume only failed nodes.`,
+            );
+        }
 
         await standardizeHeadingsByRules(
             selectedChapterMap,
@@ -796,8 +968,67 @@ export const runTranslationJob = async ({
             logger,
         );
 
-        await synchronizeTocHtml(chapterMap, plan.tocId);
-        ({ ncxEntry, ncxContent } = await synchronizeNcx(chapterMap, zipEntries));
+        const linkContext = buildLinkContext(chapterMap, zipEntries);
+        const linkStats = rewriteInternalLinks(chapterMap, linkContext);
+        console.log(
+            `\n🔗 Step 5.5: Rewrote ${linkStats.rewritten}/${linkStats.scanned} internal link(s)${linkStats.unresolved > 0 ? ` (${linkStats.unresolved} unresolved)` : ""}.`,
+        );
+
+        const tocResult = await synchronizeTocHtml(
+            chapterMap,
+            plan.tocId,
+            linkContext,
+        );
+        if (!tocResult.ok) {
+            throw new Error(
+                `HTML TOC synchronization failed: ${tocResult.error}. Cache retained; output not written.`,
+            );
+        }
+        const ncxResult = await synchronizeNcx(
+            chapterMap,
+            zipEntries,
+            linkContext,
+        );
+        ncxEntry = ncxResult.ncxEntry;
+        ncxContent = ncxResult.ncxContent;
+        if (!ncxResult.ok) {
+            throw new Error(
+                `NCX synchronization failed: ${ncxResult.error}. Cache retained; output not written.`,
+            );
+        }
+
+        // 保存前验收：内部链接（含锚点）必须全部可解析
+        const linkValidation = validateInternalLinks(chapterMap, linkContext);
+        if (linkStats.unresolved > 0 || linkValidation.dangling > 0) {
+            const details = [
+                `dangling=${linkValidation.dangling}`,
+                `unresolvedAfterRewrite=${linkStats.unresolved}`,
+                ...linkValidation.samples,
+            ];
+            throw new Error(
+                `EPUB link validation failed before save: ${details.join("; ")}. Cache retained; output not written.`,
+            );
+        }
+        console.log(
+            `\n🔎 Step 5.6: Link validation passed (${linkValidation.total} internal link(s)).`,
+        );
+
+        // 保存前验收：NCX 目录的文件与锚点必须全部可解析
+        if (ncxEntry && ncxContent) {
+            const ncxValidation = validateNcxLinks(
+                ncxContent,
+                ncxEntry.entryName,
+                linkContext,
+            );
+            if (ncxValidation.dangling > 0) {
+                throw new Error(
+                    `NCX validation failed before save: ${ncxValidation.dangling}/${ncxValidation.total} entries dangling. ${ncxValidation.samples.join("; ")}. Cache retained; output not written.`,
+                );
+            }
+            console.log(
+                `🔎 Step 5.7: NCX validation passed (${ncxValidation.total} entries).`,
+            );
+        }
 
         await saveEpub(
             zip,
@@ -806,24 +1037,57 @@ export const runTranslationJob = async ({
             ncxContent ?? null,
             outputPath,
             logger,
+            repairReport,
         );
 
         const finalInputPath = path.resolve(inputDir, path.basename(inputPath));
-        moveFileIfNeeded(inputPath, finalInputPath);
+        const archivedInputPath = moveFileIfNeeded(
+            inputPath,
+            finalInputPath,
+        );
 
-        console.log(`\n✅ All done! Output: ${path.basename(outputPath)}`);
-        return { outputPath, cacheDir, logFile: logger.logFile };
+        completed = true;
+        shouldKeepArtifacts = shouldKeepArtifacts || translationStatus !== "complete";
+        if (translationStatus === "complete") {
+            console.log(`\n✅ All done! Output: ${path.basename(outputPath)}`);
+        } else {
+            console.log(
+                `\n⚠️ Output written with unresolved nodes: ${path.basename(outputPath)} (cache retained; rerun to resume failed nodes)`,
+            );
+        }
+        return buildJobResult({
+            outputPath,
+            cacheDir,
+            logFile: logger.logFile,
+            translationStatus,
+            validationStatus:
+                translationStatus === "complete" ? "ok" : "partial",
+            counts: {
+                chapters: translationReport.chapters.length,
+                failedChapters: translationReport.failedChapters.length,
+                partialChapters: translationReport.partialChapters.length,
+            },
+            archivedInputPath,
+        });
     } catch (error) {
-        shouldKeepArtifacts = debugMode;
+        shouldKeepArtifacts = true;
         logger.write(
             "ERROR",
             `Main Process Fatal Error: ${error.stack || error.message}`,
         );
         throw error;
     } finally {
-        if (!shouldKeepArtifacts) {
-            cache.removeDir();
-            logger.remove();
+        const retention = finalizeJobArtifacts({
+            cache,
+            logger,
+            debugMode,
+            keepArtifacts: !completed || shouldKeepArtifacts,
+        });
+        if (retention === "retained" && !debugMode) {
+            logger.write(
+                "WARN",
+                `Artifacts retained (status=${translationStatus}, completed=${completed}): ${cacheDir}`,
+            );
         }
     }
 };
@@ -858,8 +1122,11 @@ export const runHtmlTranslationJob = async ({
         outputDir,
         `${fileInfo.name}_${targetLanguageSlug}.html`,
     );
-    const cacheDir = path.resolve(projectRoot, `.cache_${fileInfo.name}_html`);
-    const cache = createProgressCache(cacheDir);
+    const cacheDir = path.resolve(
+        projectRoot,
+        `.cache_${fileInfo.name}_html_${targetLanguageSlug}`,
+    );
+    const cache = createJobCache(cacheDir);
 
     console.log(`\n========================================`);
     console.log(`📄 Input:  ${path.basename(inputPath)}`);
@@ -881,12 +1148,31 @@ export const runHtmlTranslationJob = async ({
 
     let completed = false;
     let shouldKeepArtifacts = debugMode;
+    let translationStatus = "complete";
 
     try {
         const chapterMap = createSingleHtmlChapterMap(inputPath);
         const chapters = [...chapterMap.values()];
         const referencedIds = collectReferencedIds(chapterMap);
         const definedClasses = new Set();
+
+        ensureCacheIdentity(
+            cache,
+            buildTaskSignature({
+                kind: "html",
+                sourceDigest: computeFileDigest(inputPath),
+                sourceLanguage: runtimeConfig.sourceLanguage,
+                targetLanguage: runtimeConfig.targetLanguage,
+                extras: {
+                    promptDigest: computePromptDigest(
+                        projectRoot,
+                        "html_translation_prompt.txt",
+                    ),
+                },
+            }),
+            { kind: "html" },
+            logger,
+        );
 
         let headingFormatRules = [];
         let glossary = {};
@@ -921,26 +1207,32 @@ export const runHtmlTranslationJob = async ({
             cache.saveGlossary(glossary);
         }
 
-        const cachedHtml = cache.load("document");
-        if (cachedHtml) {
-            console.log(`\n📑 Found cached translated HTML, reusing it.`);
-            chapterMap.get("document").html = cachedHtml;
-        } else {
-            await performTranslation(
-                chapters,
-                chapterMap,
-                glossary,
-                runtimeConfig,
-                aiProvider,
-                batchQueue,
-                logger,
-                cache,
-                referencedIds,
-                definedClasses,
-                "html",
-                debugMode,
+        const translationReport = await performTranslation(
+            chapters,
+            chapterMap,
+            glossary,
+            runtimeConfig,
+            aiProvider,
+            batchQueue,
+            logger,
+            cache,
+            referencedIds,
+            definedClasses,
+            "html",
+            debugMode,
+        );
+        translationStatus = translationReport.status;
+        await batchQueue.drainQueue();
+
+        if (translationStatus === "failed") {
+            throw new Error(
+                "Translation failed for every pending chapter. Cache retained for resume.",
             );
-            await batchQueue.drainQueue();
+        }
+        if (translationStatus === "partial") {
+            console.log(
+                `\n⚠️ Partial translation: ${translationReport.partialChapters.length} chapter(s) have unresolved nodes. Cache retained; rerun to resume only failed nodes.`,
+            );
         }
 
         await standardizeHeadingsByRules(
@@ -958,21 +1250,54 @@ export const runHtmlTranslationJob = async ({
         );
 
         const finalInputPath = path.resolve(inputDir, path.basename(inputPath));
-        moveFileIfNeeded(inputPath, finalInputPath);
+        const archivedInputPath = moveFileIfNeeded(
+            inputPath,
+            finalInputPath,
+        );
 
-        console.log(`\n✅ All done! Output: ${path.basename(outputPath)}`);
-        return { outputPath, cacheDir, logFile: logger.logFile };
+        completed = true;
+        shouldKeepArtifacts =
+            shouldKeepArtifacts || translationStatus !== "complete";
+        if (translationStatus === "complete") {
+            console.log(`\n✅ All done! Output: ${path.basename(outputPath)}`);
+        } else {
+            console.log(
+                `\n⚠️ Output written with unresolved nodes: ${path.basename(outputPath)} (cache retained; rerun to resume failed nodes)`,
+            );
+        }
+        return buildJobResult({
+            outputPath,
+            cacheDir,
+            logFile: logger.logFile,
+            translationStatus,
+            validationStatus:
+                translationStatus === "complete" ? "ok" : "partial",
+            counts: {
+                chapters: translationReport.chapters.length,
+                failedChapters: translationReport.failedChapters.length,
+                partialChapters: translationReport.partialChapters.length,
+            },
+            archivedInputPath,
+        });
     } catch (error) {
-        shouldKeepArtifacts = debugMode;
+        shouldKeepArtifacts = true;
         logger.write(
             "ERROR",
             `Main Process Fatal Error: ${error.stack || error.message}`,
         );
         throw error;
     } finally {
-        if (!shouldKeepArtifacts) {
-            cache.removeDir();
-            logger.remove();
+        const retention = finalizeJobArtifacts({
+            cache,
+            logger,
+            debugMode,
+            keepArtifacts: !completed || shouldKeepArtifacts,
+        });
+        if (retention === "retained" && !debugMode) {
+            logger.write(
+                "WARN",
+                `Artifacts retained (status=${translationStatus}, completed=${completed}): ${cacheDir}`,
+            );
         }
     }
 };
@@ -1021,10 +1346,10 @@ export const runPdfTranslationJob = async ({
     const cacheDir = path.resolve(
         projectRoot,
         pageSelector
-            ? `.cache_${fileInfo.name}_page-${selectionSlug}_pdf`
-            : `.cache_${fileInfo.name}_pdf`,
+            ? `.cache_${fileInfo.name}_page-${selectionSlug}_pdf_${targetLanguageSlug}`
+            : `.cache_${fileInfo.name}_pdf_${targetLanguageSlug}`,
     );
-    const cache = createProgressCache(cacheDir);
+    const cache = createJobCache(cacheDir);
     const extractedJsonPath = path.resolve(cacheDir, "pdf_blocks.json");
     const translatedJsonPath = path.resolve(cacheDir, "pdf_blocks_translated.json");
     const debugSummaryPath = path.resolve(cacheDir, "pdf_blocks_debug.json");
@@ -1060,8 +1385,29 @@ export const runPdfTranslationJob = async ({
     console.log(`========================================\n`);
 
     let completed = false;
+    let translationStatus = "complete";
+    let validationStatus = "not_run";
 
     try {
+        ensureCacheIdentity(
+            cache,
+            buildTaskSignature({
+                kind: "pdf",
+                sourceDigest: computeFileDigest(inputPath),
+                sourceLanguage: runtimeConfig.sourceLanguage,
+                targetLanguage: runtimeConfig.targetLanguage,
+                extras: {
+                    pageSelector: pageSelector || null,
+                    promptDigest: computePromptDigest(
+                        projectRoot,
+                        "pdf_translation_prompt.txt",
+                    ),
+                },
+            }),
+            { kind: "pdf" },
+            logger,
+        );
+
         console.log("\n📤 Step 1: Extracting PDF text blocks to JSON...");
         const hasCachedExtraction = fs.existsSync(extractedJsonPath);
         const cachedPdfJson = hasCachedExtraction
@@ -1128,26 +1474,32 @@ export const runPdfTranslationJob = async ({
             cache.saveGlossary(glossary);
         }
 
-        const cachedHtml = cache.load("document");
-        if (cachedHtml) {
-            console.log(`\n📑 Found cached translated PDF HTML, reusing it.`);
-            chapterMap.get("document").html = cachedHtml;
-        } else {
-            await performTranslation(
-                chapters,
-                chapterMap,
-                glossary,
-                runtimeConfig,
-                aiProvider,
-                batchQueue,
-                logger,
-                cache,
-                referencedIds,
-                definedClasses,
-                "pdf",
-                debugMode,
+        const translationReport = await performTranslation(
+            chapters,
+            chapterMap,
+            glossary,
+            runtimeConfig,
+            aiProvider,
+            batchQueue,
+            logger,
+            cache,
+            referencedIds,
+            definedClasses,
+            "pdf",
+            debugMode,
+        );
+        translationStatus = translationReport.status;
+        await batchQueue.drainQueue();
+
+        if (translationStatus === "failed") {
+            throw new Error(
+                "Translation failed for every pending chapter. Cache retained for resume.",
             );
-            await batchQueue.drainQueue();
+        }
+        if (translationStatus === "partial") {
+            console.log(
+                `\n⚠️ Partial translation: ${translationReport.partialChapters.length} chapter(s) have unresolved nodes. Cache retained; rerun to resume only failed nodes.`,
+            );
         }
 
         const translatedHtml = chapterMap.get("document").html;
@@ -1164,6 +1516,19 @@ export const runPdfTranslationJob = async ({
         }
 
         const translatedPdfJson = applyTranslatedHtmlToPdfJson(pdfJson, translatedHtml);
+        const pdfMappingReport = translatedPdfJson.translationReport || {};
+        console.log(
+            `   Mapping: matched=${pdfMappingReport.matchedBlocks ?? 0}, missing=${pdfMappingReport.missingBlockIds?.length ?? 0}, unknown=${pdfMappingReport.unknownBlockIds?.length ?? 0}, duplicate=${pdfMappingReport.duplicateBlockIds?.length ?? 0}, unrecoveredPlaceholders=${pdfMappingReport.unrecoveredPlaceholders?.length ?? 0}`,
+        );
+        if (
+            (pdfMappingReport.missingBlockIds?.length ?? 0) > 0 ||
+            (pdfMappingReport.unrecoveredPlaceholders?.length ?? 0) > 0
+        ) {
+            logger.write(
+                "WARN",
+                `PDF mapping issues: missing=${JSON.stringify(pdfMappingReport.missingBlockIds || [])}, unrecovered=${JSON.stringify(pdfMappingReport.unrecoveredPlaceholders || [])}`,
+            );
+        }
         const repairedRuns = await repairPdfMergedTranslationRuns(
             translatedPdfJson,
             aiProvider,
@@ -1203,13 +1568,29 @@ export const runPdfTranslationJob = async ({
         }
 
         console.log("\n📥 Step 5: Filling translated text back into PDF...");
-        await fillPdfFromJson(inputPath, translatedJsonPath, outputPdfPath, logger);
+        const pdfFillResultPath = path.resolve(
+            cacheDir,
+            "pdf_fill_result.json",
+        );
+        const fillResult = await fillPdfFromJson(
+            inputPath,
+            translatedJsonPath,
+            outputPdfPath,
+            logger,
+            pdfFillResultPath,
+        );
+        const actualPdfPath = fillResult.outputPath;
+        if (fillResult.usedFallback) {
+            console.log(
+                `   ⚠️ Target PDF was locked; actual output: ${path.basename(actualPdfPath)}`,
+            );
+        }
 
         console.log("\n🔎 Step 6: Validating rendered PDF...");
         const validationReport = await validatePdfOutput(
             inputPath,
             translatedJsonPath,
-            outputPdfPath,
+            actualPdfPath,
             validationJsonPath,
             logger,
         );
@@ -1218,24 +1599,43 @@ export const runPdfTranslationJob = async ({
         );
 
         const finalInputPath = path.resolve(inputDir, path.basename(inputPath));
-        moveFileIfNeeded(inputPath, finalInputPath);
+        const archivedInputPath = moveFileIfNeeded(
+            inputPath,
+            finalInputPath,
+        );
 
-        if (validationReport.status === "ok") {
-            console.log(`\n✅ All done! Output: ${path.basename(outputPdfPath)}`);
+        completed = true;
+        validationStatus = validationReport.status;
+        if (translationStatus === "complete" && validationReport.status === "ok") {
+            console.log(`\n✅ All done! Output: ${path.basename(actualPdfPath)}`);
+        } else if (translationStatus !== "complete") {
+            console.log(
+                `\n⚠️ Output written with unresolved nodes: ${path.basename(actualPdfPath)} (cache retained; rerun to resume failed nodes)`,
+            );
         } else {
             console.log(
                 `\n⚠️ Render finished with review required. Validation: ${path.basename(validationJsonPath)}`,
             );
         }
-        completed = true;
-        return {
-            outputPath: outputPdfPath,
-            htmlOutputPath: outputHtmlPath,
+        return buildJobResult({
+            outputPath: actualPdfPath,
             cacheDir,
             logFile: logger.logFile,
-            validationPath: validationJsonPath,
+            reportPath: validationJsonPath,
             validationStatus: validationReport.status,
-        };
+            translationStatus,
+            counts: {
+                chapters: translationReport.chapters.length,
+                failedChapters: translationReport.failedChapters.length,
+                partialChapters: translationReport.partialChapters.length,
+            },
+            archivedInputPath,
+            extra: {
+                htmlOutputPath: outputHtmlPath,
+                validationPath: validationJsonPath,
+                pdfMappingReport,
+            },
+        });
     } catch (error) {
         logger.write(
             "ERROR",
@@ -1243,13 +1643,20 @@ export const runPdfTranslationJob = async ({
         );
         throw error;
     } finally {
-        if (completed && !debugMode) {
-            cache.removeDir();
-            logger.remove();
-        } else if (!completed) {
+        const retention = finalizeJobArtifacts({
+            cache,
+            logger,
+            debugMode,
+            keepArtifacts: !(
+                completed &&
+                translationStatus === "complete" &&
+                validationStatus === "ok"
+            ),
+        });
+        if (retention === "retained" && !debugMode) {
             logger.write(
                 "WARN",
-                `PDF rendering failed; cache retained for debugging: ${cacheDir}`,
+                `PDF artifacts retained (translation=${translationStatus}, validation=${validationStatus}, completed=${completed}): ${cacheDir}`,
             );
         }
     }
@@ -1289,8 +1696,11 @@ export const runSubtitleTranslationJob = async ({
             ? `${fileInfo.name}_${targetLanguageSlug}.mkv`
             : `${fileInfo.name}_${targetLanguageSlug}.srt`,
     );
-    const cacheDir = path.resolve(projectRoot, `.cache_${fileInfo.name}_subtitle`);
-    const cache = createProgressCache(cacheDir);
+    const cacheDir = path.resolve(
+        projectRoot,
+        `.cache_${fileInfo.name}_subtitle_${targetLanguageSlug}`,
+    );
+    const cache = createJobCache(cacheDir);
     const extractedSrtBasePath = path.resolve(cacheDir, "source_subtitle");
     const sourceJsonPath = path.resolve(cacheDir, "subtitle_cues.json");
     const translatedJsonPath = path.resolve(
@@ -1323,6 +1733,7 @@ export const runSubtitleTranslationJob = async ({
     console.log(`========================================\n`);
 
     let shouldKeepArtifacts = debugMode;
+    let translationStatus = "complete";
 
     try {
         let sourceSrtPath = inputPath;
@@ -1340,8 +1751,10 @@ export const runSubtitleTranslationJob = async ({
             if (debugMode) {
                 fs.writeFileSync(streamProbePath, JSON.stringify(streams, null, 2), "utf8");
             }
+            const supportedStreams = streams.filter(isSubtitleCodecSupported);
             const selectedStream = selectSubtitleStream({
-                streams,
+                streams:
+                    supportedStreams.length > 0 ? supportedStreams : streams,
                 preferredLanguage: sourceLanguageExplicit
                     ? runtimeConfig.sourceLanguage
                     : null,
@@ -1371,6 +1784,34 @@ export const runSubtitleTranslationJob = async ({
                 subtitleTrack.kind === "external"
                     ? `${extractedSrtBasePath}_external.srt`
                     : `${extractedSrtBasePath}_${subtitleTrack.streamIndex}.srt`;
+
+            // 任务身份必须在复用提取结果之前校验，避免视频被替换后仍翻译旧字幕
+            const externalSubtitleDigest =
+                subtitleTrack.kind === "external" && subtitleTrack.path
+                    ? computeFileDigest(subtitleTrack.path)
+                    : null;
+            ensureCacheIdentity(
+                cache,
+                buildTaskSignature({
+                    kind: "subtitle",
+                    sourceDigest: computeFileDigest(inputPath),
+                    sourceLanguage: runtimeConfig.sourceLanguage,
+                    targetLanguage: runtimeConfig.targetLanguage,
+                    extras: {
+                        inputType: "video",
+                        streamKind: subtitleTrack.kind,
+                        streamIndex: subtitleTrack.streamIndex,
+                        streamLanguage: subtitleTrack.language,
+                        externalSubtitleDigest,
+                        promptDigest: computePromptDigest(
+                            projectRoot,
+                            "subtitle_translation_prompt.txt",
+                        ),
+                    },
+                }),
+                { kind: "subtitle", inputType: "video" },
+                logger,
+            );
 
             if (fs.existsSync(extractedSrtPath)) {
                 console.log(
@@ -1403,6 +1844,29 @@ export const runSubtitleTranslationJob = async ({
                 inferSubtitleLanguageFromFile(srtContent) ||
                 runtimeConfig.sourceLanguage;
         }
+
+        // 非视频（SRT）在此校验任务身份；视频已在复用提取结果前校验
+        if (!isVideoInput) {
+            ensureCacheIdentity(
+                cache,
+                buildTaskSignature({
+                    kind: "subtitle",
+                    sourceDigest: computeTextDigest(srtContent),
+                    sourceLanguage: runtimeConfig.sourceLanguage,
+                    targetLanguage: runtimeConfig.targetLanguage,
+                    extras: {
+                        inputType: "srt",
+                        promptDigest: computePromptDigest(
+                            projectRoot,
+                            "subtitle_translation_prompt.txt",
+                        ),
+                    },
+                }),
+                { kind: "subtitle", inputType: "srt" },
+                logger,
+            );
+        }
+
         const glossaryProvider = createGlossaryProvider(logger, runtimeConfig);
 
         console.log("\n🧩 Step 3: Parsing subtitle cues to JSON...");
@@ -1448,27 +1912,33 @@ export const runSubtitleTranslationJob = async ({
             cache.saveGlossary(glossary);
         }
 
-        const cachedHtml = cache.load("document");
-        if (cachedHtml) {
-            console.log(`\n📑 Found cached translated subtitle HTML, reusing it.`);
-            chapterMap.get("document").html = cachedHtml;
-        } else {
-            console.log("\n✍️ Step 5: Translating subtitle content...");
-            await performTranslation(
-                chapters,
-                chapterMap,
-                glossary,
-                runtimeConfig,
-                aiProvider,
-                batchQueue,
-                logger,
-                cache,
-                referencedIds,
-                definedClasses,
-                "subtitle",
-                debugMode,
+        console.log("\n✍️ Step 5: Translating subtitle content...");
+        const translationReport = await performTranslation(
+            chapters,
+            chapterMap,
+            glossary,
+            runtimeConfig,
+            aiProvider,
+            batchQueue,
+            logger,
+            cache,
+            referencedIds,
+            definedClasses,
+            "subtitle",
+            debugMode,
+        );
+        translationStatus = translationReport.status;
+        await batchQueue.drainQueue();
+
+        if (translationStatus === "failed") {
+            throw new Error(
+                "Translation failed for every pending chapter. Cache retained for resume.",
             );
-            await batchQueue.drainQueue();
+        }
+        if (translationStatus === "partial") {
+            console.log(
+                `\n⚠️ Partial translation: ${translationReport.partialChapters.length} chapter(s) have unresolved nodes. Cache retained; rerun to resume only failed nodes.`,
+            );
         }
 
         console.log("\n🧱 Step 6: Writing translated subtitle artifacts...");
@@ -1499,16 +1969,39 @@ export const runSubtitleTranslationJob = async ({
         }
 
         const finalInputPath = path.resolve(inputDir, path.basename(inputPath));
-        moveFileIfNeeded(inputPath, finalInputPath);
+        const archivedInputPath = moveFileIfNeeded(
+            inputPath,
+            finalInputPath,
+        );
 
-        console.log(`\n✅ All done! Output: ${path.basename(outputPath)}`);
-        return {
+        shouldKeepArtifacts =
+            shouldKeepArtifacts || translationStatus !== "complete";
+        if (translationStatus === "complete") {
+            console.log(`\n✅ All done! Output: ${path.basename(outputPath)}`);
+        } else {
+            console.log(
+                `\n⚠️ Output written with unresolved nodes: ${path.basename(outputPath)} (cache retained; rerun to resume failed nodes)`,
+            );
+        }
+        return buildJobResult({
             outputPath,
             cacheDir,
             logFile: logger.logFile,
-            translatedJsonPath,
-            translatedSrtPath,
-        };
+            reportPath: translatedJsonPath,
+            translationStatus,
+            validationStatus:
+                translationStatus === "complete" ? "ok" : "partial",
+            counts: {
+                chapters: translationReport.chapters.length,
+                failedChapters: translationReport.failedChapters.length,
+                partialChapters: translationReport.partialChapters.length,
+            },
+            archivedInputPath,
+            extra: {
+                translatedJsonPath,
+                translatedSrtPath,
+            },
+        });
     } catch (error) {
         shouldKeepArtifacts = true;
         logger.write(
@@ -1517,9 +2010,17 @@ export const runSubtitleTranslationJob = async ({
         );
         throw error;
     } finally {
-        if (!shouldKeepArtifacts) {
-            cache.removeDir();
-            logger.remove();
+        const retention = finalizeJobArtifacts({
+            cache,
+            logger,
+            debugMode,
+            keepArtifacts: shouldKeepArtifacts,
+        });
+        if (retention === "retained" && !debugMode) {
+            logger.write(
+                "WARN",
+                `Subtitle artifacts retained (status=${translationStatus}): ${cacheDir}`,
+            );
         }
     }
 };

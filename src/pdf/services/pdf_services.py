@@ -35,8 +35,8 @@ def fill_translated_pdf(
     input_pdf: str,
     translated_json: str,
     output_pdf: str,
-) -> None:
-    _fill_pdf_preserving_graphics(input_pdf, translated_json, output_pdf)
+) -> str:
+    return _fill_pdf_preserving_graphics(input_pdf, translated_json, output_pdf)
 
 
 def validate_pdf_output(

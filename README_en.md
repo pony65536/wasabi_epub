@@ -188,6 +188,10 @@ Supported common aliases:
 
 - Output is a new `.epub` file
 - Preserves table of contents, chapter order, and original structure as much as possible
+- Non-standard ebooks with multiple chapters crammed into one XHTML are auto-diagnosed and split: chapters are rebuilt from NCX anchors/headings, anchors follow their headings, all internal links plus NCX/HTML TOCs are rewritten, and replaced original files are removed
+- Auto-repaired chapter numbers are used by `--chap`; numbering follows the spine reading order (excluding TOC/index/bibliography) and is independent of AI planning order
+- Translation runs in phases: main content first (building terminology and memory), front/back matter last
+- Before saving, all internal links (including image/resource links) plus NCX files and anchors are validated; if any dangling link remains, no output is written and the cache is kept
 - Supports `--chap`
 
 ### HTML
@@ -225,17 +229,22 @@ Input files can be placed in:
 After a successful run:
 
 - Final results are written to `output/`
-- The original input file is moved to `input/`
+- The original input file is moved to `input/`; if a file with the same name already exists there, a numbered copy is kept instead of overwriting it
 
 Without `--debug`:
 
-- Intermediate cache is automatically cleaned up
-- Log files are automatically cleaned up
+- On a fully successful run, intermediate cache and log files are cleaned up
+- If translation fails or only finishes partially, `.cache_*` and logs are retained; the next run resumes only the failed nodes
+- If every node fails, no output file is written; partial success writes the output with a clear notice about unfinished nodes
 
 With `--debug`:
 
 - `.cache_*` directories are retained
 - Log files under `log/` are retained
+
+Cache identity:
+
+- Cache directories include the target language, and caches are validated against source digest + source/target language + translation rules version, so changing `--to`, editing the source, or upgrading prompts never reuses stale translations
 
 Typical output filenames:
 

@@ -39,6 +39,11 @@ def build_parser() -> argparse.ArgumentParser:
     fill_parser.add_argument("input_pdf")
     fill_parser.add_argument("translated_json")
     fill_parser.add_argument("output_pdf")
+    fill_parser.add_argument(
+        "--result-json",
+        default=None,
+        help="write fill result JSON (actual output path) to this path",
+    )
 
     validate_parser = subparsers.add_parser(
         "validate", help="validate translated PDF output"
@@ -67,7 +72,32 @@ def main(argv: List[str]) -> int:
             f"forms={stats.forms})"
         )
     elif args.command == "fill":
-        fill_translated_pdf(args.input_pdf, args.translated_json, args.output_pdf)
+        actual_output_pdf = fill_translated_pdf(
+            args.input_pdf, args.translated_json, args.output_pdf
+        )
+        if args.result_json:
+            import json
+            from pathlib import Path
+
+            result_path = Path(args.result_json)
+            result_path.parent.mkdir(parents=True, exist_ok=True)
+            result_path.write_text(
+                json.dumps(
+                    {
+                        "protocolVersion": 1,
+                        "requestedOutputPath": args.output_pdf,
+                        "actualOutputPath": actual_output_pdf or args.output_pdf,
+                        "usedFallback": bool(
+                            actual_output_pdf
+                            and Path(actual_output_pdf).resolve()
+                            != Path(args.output_pdf).resolve()
+                        ),
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
     elif args.command == "validate":
         report = validate_pdf_output(
             args.input_pdf,

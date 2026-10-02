@@ -9,7 +9,7 @@
  */
 
 // 受保护的行内排版标签（包含超链接、格式加粗/斜体、代码、角标/脚注等）
-const INLINE_TAG_NAMES = new Set([
+export const INLINE_TAG_NAMES = new Set([
     "a",
     "em",
     "i",
@@ -39,6 +39,7 @@ export const encodeInlineTags = (htmlContent) => {
             encodedText: htmlContent || "",
             slotMap: {},
             slotTag: "ws-slot",
+            incomplete: false,
         };
     }
 
@@ -58,7 +59,8 @@ export const encodeInlineTags = (htmlContent) => {
     // 匹配最内层的行内标签 (即内部不再包含其他行内标签)，优先由内向外剥离，确保嵌套顺序纯净
     let currentText = htmlContent;
     let hasReplaced = true;
-    const maxIterations = 25;
+    // 每个标签至多被替换一次，用标签数作为安全上限，避免异常输入死循环
+    const safetyLimit = (htmlContent.match(/</g) || []).length + 5;
     let iteration = 0;
 
     const tagPattern = Array.from(INLINE_TAG_NAMES).join("|");
@@ -78,7 +80,7 @@ export const encodeInlineTags = (htmlContent) => {
         "i",
     );
 
-    while (hasReplaced && iteration < maxIterations) {
+    while (hasReplaced && iteration < safetyLimit) {
         iteration++;
         hasReplaced = false;
 
@@ -116,26 +118,58 @@ export const encodeInlineTags = (htmlContent) => {
         }
     }
 
+    const residualTagRegex = new RegExp(`<(${tagPattern})\\b`, "i");
+    const incomplete = residualTagRegex.test(currentText);
+
     return {
         encodedText: currentText,
         slotMap,
         slotTag,
+        incomplete,
     };
 };
 
 /**
- * 将包含占位符的译文安全还原为出版级 HTML
- * @param {string} translatedText - 大模型翻译返回的内容
- * @param {Record<string, { tag: string, rawAttrs: string, isSelfClosing: boolean }>} slotMap - 编码阶段记录的白名单字典
- * @param {string} slotTag - 占位符标签名 (默认 ws-slot)
- * @returns {string} - 还原后的安全 HTML
+ * 将包含占位符的译文安全还原为出版级 HTML，并报告完整性。
+ * @returns {{ html: string, missingSlots: string[], unknownSlots: string[], duplicateSlots: string[], residualSlots: number }}
  */
-export const decodeInlineTags = (translatedText, slotMap = {}, slotTag = "ws-slot") => {
-    if (!translatedText || typeof translatedText !== "string" || Object.keys(slotMap).length === 0) {
-        return translatedText || "";
+export const decodeInlineTagsDetailed = (
+    translatedText,
+    slotMap = {},
+    slotTag = "ws-slot",
+) => {
+    const source = String(translatedText ?? "");
+    if (!source || Object.keys(slotMap).length === 0) {
+        return {
+            html: source,
+            missingSlots: Object.keys(slotMap || {}),
+            unknownSlots: [],
+            duplicateSlots: [],
+            residualSlots: 0,
+        };
     }
 
-    let result = translatedText;
+    const slotIdRegex = new RegExp(
+        `<${slotTag}\\s+id=["']?(\\d+)["']?`,
+        "gi",
+    );
+    const idCounts = new Map();
+    let idMatch;
+    while ((idMatch = slotIdRegex.exec(source)) !== null) {
+        const id = idMatch[1];
+        idCounts.set(id, (idCounts.get(id) || 0) + 1);
+    }
+
+    const knownIds = new Set(Object.keys(slotMap));
+    const missingSlots = [...knownIds].filter((id) => !idCounts.has(id));
+    const unknownSlots = [...idCounts.keys()].filter(
+        (id) => !knownIds.has(id),
+    );
+    const duplicateSlots = [...idCounts.entries()]
+        .filter(([, count]) => count > 1)
+        .map(([id]) => id);
+
+    let result = source;
 
     // 递归查找并优先替换最内层的 slot 标签（其内部不包含任何其他 slotTag 标签）
     // 这样在嵌套结构下（如 <ws-slot id="2"><ws-slot id="1">...</ws-slot></ws-slot>）
@@ -151,9 +185,12 @@ export const decodeInlineTags = (translatedText, slotMap = {}, slotTag = "ws-slo
 
     let hasDecoded = true;
     let iteration = 0;
-    const maxIterations = 30;
+    // 每个 slot 至少一轮；嵌套需要额外轮次，用出现次数 * 2 作安全上限
+    const safetyLimit =
+        (source.match(new RegExp(`<${slotTag}\\b`, "g")) || []).length * 2 +
+        10;
 
-    while (hasDecoded && iteration < maxIterations) {
+    while (hasDecoded && iteration < safetyLimit) {
         iteration++;
         hasDecoded = false;
 
@@ -203,5 +240,18 @@ export const decodeInlineTags = (translatedText, slotMap = {}, slotTag = "ws-slo
         }
     }
 
-    return result;
+    const residualSlots = (
+        result.match(new RegExp(`</?${slotTag}\\b`, "g")) || []
+    ).length;
+
+    return {
+        html: result,
+        missingSlots,
+        unknownSlots,
+        duplicateSlots,
+        residualSlots,
+    };
 };
+
+export const decodeInlineTags = (translatedText, slotMap = {}, slotTag = "ws-slot") =>
+    decodeInlineTagsDetailed(translatedText, slotMap, slotTag).html;

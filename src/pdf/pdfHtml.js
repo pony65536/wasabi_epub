@@ -416,10 +416,22 @@ export const applyTranslatedHtmlToPdfJson = (pdfJson, translatedHtml) => {
         blocksById.set(String(block.id), block);
     }
 
+    const seenHtmlIds = new Set();
+    const duplicateBlockIds = new Set();
+    const unknownBlockIds = new Set();
+    const unrecoveredPlaceholders = [];
+    let matchedBlocks = 0;
+
     $("[data-pdf-block-id]").each((_, el) => {
-        const id = $(el).attr("data-pdf-block-id");
-        const block = blocksById.get(String(id));
-        if (!block) return;
+        const id = String($(el).attr("data-pdf-block-id"));
+        if (seenHtmlIds.has(id)) duplicateBlockIds.add(id);
+        seenHtmlIds.add(id);
+        const block = blocksById.get(id);
+        if (!block) {
+            unknownBlockIds.add(id);
+            return;
+        }
+        matchedBlocks += 1;
         const extractionState = {
             text: "",
             styleRuns: [],
@@ -443,9 +455,11 @@ export const applyTranslatedHtmlToPdfJson = (pdfJson, translatedHtml) => {
         ).replace(/\s+/g, " ").trim();
         if (translatedText && INLINE_FORMULA_PLACEHOLDER_REGEX.test(translatedText)) {
             INLINE_FORMULA_PLACEHOLDER_REGEX.lastIndex = 0;
+            unrecoveredPlaceholders.push({ id, kind: "formula" });
         }
         if (translatedText && INLINE_PRESERVE_PLACEHOLDER_REGEX.test(translatedText)) {
             INLINE_PRESERVE_PLACEHOLDER_REGEX.lastIndex = 0;
+            unrecoveredPlaceholders.push({ id, kind: "preserve" });
         }
         if (translatedText && isTranslationMetaNote(translatedText)) {
             block.translationMetaNote = translatedText;
@@ -474,6 +488,22 @@ export const applyTranslatedHtmlToPdfJson = (pdfJson, translatedHtml) => {
                 .filter(Boolean);
         }
     });
+
+    const missingBlockIds = [...blocksById.values()]
+        .filter(
+            (block) =>
+                !block.preserveOriginal &&
+                !seenHtmlIds.has(String(block.id)),
+        )
+        .map((block) => String(block.id));
+
+    pdfJson.translationReport = {
+        matchedBlocks,
+        missingBlockIds,
+        unknownBlockIds: [...unknownBlockIds],
+        duplicateBlockIds: [...duplicateBlockIds],
+        unrecoveredPlaceholders,
+    };
 
     return pdfJson;
 };

@@ -188,7 +188,24 @@ export const formatBookBibleForPrompt = (bookBible) => {
         }
     }
 
-    // 3. 排版与标点规范
+    // 3. 世界观与术语表（含动态记忆沉淀的新术语）
+    if (
+        bookBible.worldviewAndGlossary &&
+        typeof bookBible.worldviewAndGlossary === "object"
+    ) {
+        const entries = Object.entries(bookBible.worldviewAndGlossary)
+            .filter(([term, translated]) => term && translated)
+            .slice(0, 120);
+        if (entries.length > 0) {
+            sections.push(
+                `[BOOK BIBLE: GLOSSARY (keep these translations consistent)]\n${entries
+                    .map(([term, translated]) => `- ${term}: ${translated}`)
+                    .join("\n")}`,
+            );
+        }
+    }
+
+    // 4. 排版与标点规范
     if (bookBible.syntaxConventions) {
         const syntax = bookBible.syntaxConventions;
         const rules = [];

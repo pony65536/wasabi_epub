@@ -88,11 +88,11 @@ export class LivingMemoryStore {
     }
 }
 
-const buildExtractorPrompt = (sourceLanguage, targetLanguage) => `
+export const buildExtractorPrompt = (sourceLanguage, targetLanguage) => `
 You are the "Entity & Terminology Extractor" for a book translation project.
 
 Task:
-Analyze the provided translated chapter excerpt, identify any NEW key characters, recurring proper nouns, specialized terminology, or organizational names that should remain consistent throughout subsequent chapters.
+Analyze the provided chapter (source text and/or translated text), identify any NEW key characters, recurring proper nouns, specialized terminology, or organizational names that should remain consistent throughout subsequent chapters.
 
 Target Language: ${targetLanguage}
 Source Language: ${sourceLanguage}
@@ -115,11 +115,13 @@ Rules:
 }
 2. Extract only HIGH-VALUE, RECURRING, or SPECIFIC entities (characters, locations, organizations, unique concepts).
 3. Do NOT include generic common words (e.g. "morning", "car", "good").
-4. If no significant new entities are found, return empty arrays/objects.
+4. "name" and "Source Term" keys MUST use the ORIGINAL source-language wording (from the SOURCE section when provided), never the translated wording.
+5. If no significant new entities are found, return empty arrays/objects.
 `.trim();
 
 /**
- * 异步从章节译文中提炼增量记忆实体
+ * 异步从章节译文中提炼增量记忆实体。
+ * 提供 options.sourceText 时使用「源/译对照」，保证术语键为源语。
  */
 export const extractChapterMemory = async (
     chapterContentText,
@@ -128,19 +130,24 @@ export const extractChapterMemory = async (
     logger,
     runtimeConfig,
     chapterTitle = "",
+    options = {},
 ) => {
-    if (!chapterContentText || chapterContentText.length < 200) return;
+    const sourceText = normalizeText(options.sourceText || "").slice(0, 4000);
+    const translatedText = normalizeText(chapterContentText || "").slice(0, 4000);
+    if (!sourceText && translatedText.length < 200) return;
 
     try {
-        const sampleText = normalizeText(chapterContentText).slice(0, 4000);
         const prompt = buildExtractorPrompt(
             runtimeConfig.sourceLanguage,
             runtimeConfig.targetLanguage,
         );
+        const userContent = sourceText
+            ? `SOURCE (${runtimeConfig.sourceLanguage}):\n${sourceText}\n\nTRANSLATED (${runtimeConfig.targetLanguage}):\n${translatedText}`
+            : translatedText;
 
         const result = await callAIWithRetry(
             aiProvider,
-            sampleText,
+            userContent,
             prompt,
             2,
         );
@@ -151,7 +158,7 @@ export const extractChapterMemory = async (
         const hasUpdates = livingMemoryStore.mergeIncremental({
             characters,
             terms,
-            chapterId: chapterTitle,
+            chapterId: options.chapterId || chapterTitle,
         });
 
         if (hasUpdates) {

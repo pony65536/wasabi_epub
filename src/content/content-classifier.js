@@ -2,7 +2,9 @@ const NOISE_SYMBOL_REGEX = /^[0-9oO#.:,_\-\/\\|()[\]{}*+=~`"' ]+$/;
 const CAPTION_REGEX = /^(fig(?:ure)?\.?|table)\s*[A-Za-z0-9.\-:]*$/i;
 const BROKEN_OCR_REGEX =
     /^([A-Za-z]\s+[A-Za-z][\-.,:]?|[.\-_:]{3,}[A-Za-z]?|[A-Za-z]?[.\-_:]{3,})$/;
-const WORD_REGEX = /[A-Za-z]{3,}/g;
+const LATIN_WORD_REGEX = /[A-Za-z]{3,}/g;
+const CJK_TEXT_REGEX =
+    /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]{2,}/u;
 const FORMULA_HINT_REGEX =
     /(?:[=≈≤≥∑∫√^×÷]|\b(?:sin|cos|tan|log|ln)\b|[A-Za-z0-9]\s*[*]\s*[A-Za-z0-9])/;
 
@@ -11,6 +13,20 @@ const NON_TEXT_CONTENT_REGEX =
 const TABLE_MATH_MARKUP_REGEX = /<(?:math|svg|img|mjx-container)\b/i;
 
 const countMatches = (text, regex) => (text.match(regex) || []).length;
+
+/**
+ * 文本是否包含可翻译的「词」：
+ * - 拉丁字母连续 3+
+ * - 任意 Unicode 字母连续 3+（西里尔、希腊等）
+ * - CJK/假名/韩文连续 2+
+ */
+const hasTextualWords = (normalized) => {
+    if (LATIN_WORD_REGEX.test(normalized)) return true;
+    LATIN_WORD_REGEX.lastIndex = 0;
+    if (CJK_TEXT_REGEX.test(normalized)) return true;
+    if (/\p{L}{3,}/u.test(normalized)) return true;
+    return false;
+};
 
 const previewText = (text, maxLength = 80) => {
     const normalized = String(text ?? "").replace(/\s+/g, " ").trim();
@@ -24,17 +40,36 @@ export const normalizeText = (text) =>
         .replace(/\s+/g, " ")
         .trim();
 
-export const classifyTextNode = (text) => {
+const classifyTextNodeInternal = (text) => {
     const normalized = normalizeText(text);
     if (!normalized) {
         return { type: "TEXT_NOISE", action: "DROP", reason: "empty" };
     }
 
-    if (normalized.includes("�")) {
+    const letterCount = countMatches(normalized, /\p{L}/gu);
+    const digitCount = countMatches(normalized, /\p{N}/gu);
+    const symbolCount = countMatches(normalized, /\p{S}/gu);
+    const punctCount = countMatches(normalized, /\p{P}/gu);
+    const latinWords = normalized.match(LATIN_WORD_REGEX) || [];
+    const hasWords = hasTextualWords(normalized);
+    const compact = normalized.replace(/\s+/g, "");
+
+    // 替换字符不再整段丢弃：有足够字母时保留并标记 uncertain
+    const replacementCount = countMatches(normalized, /�/g);
+    if (replacementCount > 0) {
+        if (letterCount >= 8) {
+            return {
+                type: "TEXT_NORMAL",
+                action: "KEEP",
+                reason: "replacement_char_present",
+                uncertain: true,
+            };
+        }
         return {
             type: "TEXT_NOISE",
             action: "DROP",
             reason: "replacement_char",
+            uncertain: true,
         };
     }
 
@@ -42,16 +77,9 @@ export const classifyTextNode = (text) => {
         return { type: "CAPTION", action: "KEEP", reason: "caption_label" };
     }
 
-    const alphaCount = countMatches(normalized, /[A-Za-z]/g);
-    const digitCount = countMatches(normalized, /\d/g);
-    const symbolCount = countMatches(normalized, /[^A-Za-z0-9\s]/g);
-    const wordMatches = normalized.match(WORD_REGEX) || [];
-    const hasWords = wordMatches.length > 0;
-    const compact = normalized.replace(/\s+/g, "");
-
     if (
         compact.length <= 3 &&
-        alphaCount <= 2 &&
+        letterCount <= 2 &&
         digitCount <= 2 &&
         !hasWords
     ) {
@@ -80,9 +108,9 @@ export const classifyTextNode = (text) => {
 
     if (
         FORMULA_HINT_REGEX.test(normalized) &&
-        alphaCount + digitCount > 0 &&
+        letterCount + digitCount > 0 &&
         symbolCount >= 2 &&
-        wordMatches.length <= 2
+        latinWords.length <= 2
     ) {
         return {
             type: "FORMULA",
@@ -110,7 +138,7 @@ export const classifyTextNode = (text) => {
         !hasWords &&
         compact.length >= 4 &&
         (NOISE_SYMBOL_REGEX.test(normalized) ||
-            symbolCount / Math.max(compact.length, 1) >= 0.45)
+            (symbolCount + punctCount) / Math.max(compact.length, 1) >= 0.45)
     ) {
         return {
             type: "TEXT_NOISE",
@@ -122,7 +150,7 @@ export const classifyTextNode = (text) => {
     if (
         !hasWords &&
         compact.length <= 6 &&
-        alphaCount <= 2 &&
+        letterCount <= 2 &&
         symbolCount + digitCount >= Math.max(compact.length - 1, 1)
     ) {
         return {
@@ -133,6 +161,24 @@ export const classifyTextNode = (text) => {
     }
 
     return { type: "TEXT_NORMAL", action: "KEEP", reason: "default_keep" };
+};
+
+// 动作语义别名：translate / preserve / uncertain（action 保留用于兼容）
+const DECISION_BY_ACTION = {
+    KEEP: "translate",
+    SKIP: "preserve",
+    DROP: "preserve",
+    PLACEHOLDER: "preserve",
+};
+
+export const classifyTextNode = (text) => {
+    const result = classifyTextNodeInternal(text);
+    return {
+        ...result,
+        decision: result.uncertain
+            ? "uncertain"
+            : DECISION_BY_ACTION[result.action] || "uncertain",
+    };
 };
 
 const hasNonTextContent = (html) =>

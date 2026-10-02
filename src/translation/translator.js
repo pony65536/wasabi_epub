@@ -15,8 +15,14 @@ import {
     normalizeText,
 } from "../content/content-classifier.js";
 import { formatBookBibleForPrompt } from "../content/director.js";
-import { extractAndFormatNotes, appendFootnotesSection } from "../content/footnotes.js";
+import {
+    extractAndFormatNotes,
+    appendFootnotesSection,
+    findMaxFootnoteIndex,
+} from "../content/footnotes.js";
 import { extractChapterMemory } from "../content/memory.js";
+import { computeCoverageAudit } from "./coverage.js";
+import { computeTextDigest } from "../support/taskIdentity.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -991,51 +997,142 @@ const enqueueChapterTranslation = (
         console.log(line);
     };
 
-    if (translationMode !== "html") {
-        unwrapUselessSpans($, referencedIds, definedClasses);
-    }
-
+    const resumeFailedOnly = Boolean(
+        chapterTranslationOptions?.resumeFailedOnly,
+    );
     let skippedNodeCount = 0;
 
-    $("table").each((i, el) => {
-        const $el = $(el);
-        const cellTexts = $el
-            .find("th, td")
-            .map((_, cell) => $(cell).text())
-            .get();
-        const classification = classifyNode({
-            tagName: el.name,
-            text: $el.text(),
-            html: $el.html(),
-            cellTexts,
+    // 覆盖率审计：按文本节点位置/身份核对，避免子串匹配掩盖漏翻
+    const AUDIT_ATTR = "data-wasabi-audit";
+    const markAudit = (node, kind) => {
+        if (!node) return;
+        try {
+            $(node).attr(AUDIT_ATTR, kind);
+        } catch {
+            // 标记失败不影响翻译
+        }
+    };
+    const walkTextNodes = (visitor) => {
+        const rootNode = $("body")[0] || $.root()[0];
+        if (!rootNode) return;
+        const visit = (node) => {
+            if (!node) return;
+            if (node.type === "text") {
+                visitor(node);
+                return;
+            }
+            for (const child of node.children || []) visit(child);
+        };
+        visit(rootNode);
+    };
+    const collectTextNodeGaps = () => {
+        const gaps = [];
+        walkTextNodes((textNode) => {
+            const text = normalizeText(textNode.data || "");
+            const letterCount = (text.match(/\p{L}/gu) || []).length;
+            if (letterCount < 4) return;
+            const parent = textNode.parent;
+            const tag = String(
+                parent?.tagName || parent?.name || "",
+            ).toLowerCase();
+            if (VISIBLE_TEXT_EXCLUDED_TAGS.has(tag)) return;
+            if ($(parent).closest(`[${AUDIT_ATTR}]`).length > 0) return;
+            gaps.push({
+                id: null,
+                reason: "not_selected",
+                sample: text.replace(/\s+/g, " ").slice(0, 80),
+                letterCount,
+            });
+        });
+        return gaps;
+    };
+    const isSampleCovered = (sample) => {
+        let covered = false;
+        walkTextNodes((textNode) => {
+            if (covered) return;
+            const text = normalizeText(textNode.data || "");
+            if (
+                text.includes(sample) &&
+                $(textNode.parent).closest(`[${AUDIT_ATTR}]`).length > 0
+            ) {
+                covered = true;
+            }
+        });
+        return covered;
+    };
+    const mergePreviousCoverageGaps = (coverage) => {
+        const previousGaps =
+            chapterTranslationOptions?.previousCoverageGaps || [];
+        if (previousGaps.length === 0) return coverage;
+        const docText = normalizeText(
+            ($("body").length ? $("body") : $.root()).text(),
+        );
+        for (const prev of previousGaps) {
+            const sample = normalizeText(prev?.sample || "");
+            if (!sample || !docText.includes(sample)) continue;
+            if (
+                coverage.gaps.some(
+                    (gap) => normalizeText(gap.sample || "") === sample,
+                )
+            ) {
+                continue;
+            }
+            if (isSampleCovered(sample)) continue;
+            coverage.gaps.push({ ...prev, carriedOver: true });
+        }
+        return coverage;
+    };
+
+    const collectNodesToTranslate = () => {
+        const collected = [];
+        const preservedUnits = [];
+
+        if (translationMode !== "html") {
+            unwrapUselessSpans($, referencedIds, definedClasses);
+        }
+
+        $("table").each((i, el) => {
+            const $el = $(el);
+            const cellTexts = $el
+                .find("th, td")
+                .map((_, cell) => $(cell).text())
+                .get();
+            const classification = classifyNode({
+                tagName: el.name,
+                text: $el.text(),
+                html: $el.html(),
+                cellTexts,
+            });
+
+            if (classification.action !== "PLACEHOLDER") return;
+
+            const logEntry = buildClassificationLog(
+                `table_${i}`,
+                classification,
+                $el.text(),
+            );
+            skippedNodeCount++;
+            logClassification(
+                logger,
+                enrichClassificationLog($, el, chapterTitle, logEntry, $.html($el)),
+                debugMode,
+            );
         });
 
-        if (classification.action !== "PLACEHOLDER") return;
+        if (translationMode === "html") {
+            const visibleNodes = collectVisibleTextNodes(
+                $,
+                $("body").length ? $("body") : $.root(),
+                logger,
+                debugMode,
+            );
+            for (const node of visibleNodes) {
+                $(node.node).attr("data-t-id", node.id);
+                markAudit(node.node, "selected");
+            }
+            return { collected: visibleNodes, preservedUnits: [] };
+        }
 
-        const logEntry = buildClassificationLog(
-            `table_${i}`,
-            classification,
-            $el.text(),
-        );
-        skippedNodeCount++;
-        logClassification(
-            logger,
-            enrichClassificationLog($, el, chapterTitle, logEntry, $.html($el)),
-            debugMode,
-        );
-    });
-
-    const nodesToTranslate =
-        translationMode === "html"
-            ? collectVisibleTextNodes(
-                  $,
-                  $("body").length ? $("body") : $.root(),
-                  logger,
-                  debugMode,
-              )
-            : [];
-
-    if (translationMode !== "html") {
         const explicitNodes = [];
 
         $("p, li, h1, h2, h3, h4, h5, h6, caption, title").each((i, el) => {
@@ -1068,6 +1165,12 @@ const enqueueChapterTranslation = (
                     ),
                     debugMode,
                 );
+                preservedUnits.push({
+                    id: nodeId,
+                    text: $el.text(),
+                    reason: classification.reason,
+                });
+                markAudit(el, "preserved");
                 return;
             }
 
@@ -1105,26 +1208,84 @@ const enqueueChapterTranslation = (
 
                 for (const node of structuralNodes) {
                     $(node.node).attr("data-t-id", node.id);
-                    nodesToTranslate.push({ id: node.id, content: node.content });
+                    markAudit(node.node, "selected");
+                    collected.push({
+                        id: node.id,
+                        content: node.content,
+                        node: node.node,
+                    });
                 }
+                // 结构回退覆盖全文，显式路径的保留项不再计为漏选
+                preservedUnits.length = 0;
             }
         }
 
-        if (nodesToTranslate.length === 0) {
+        if (collected.length === 0) {
             for (const node of explicitNodes) {
                 $(node.node).attr("data-t-id", node.id);
-                nodesToTranslate.push({ id: node.id, content: node.content });
+                markAudit(node.node, "selected");
+                collected.push({
+                    id: node.id,
+                    content: node.content,
+                    node: node.node,
+                });
             }
         }
-    } else {
-        for (const node of nodesToTranslate) {
-            $(node.node).attr("data-t-id", node.id);
-        }
-    }
+
+        return { collected, preservedUnits };
+    };
+
+    const collectResult = resumeFailedOnly
+        ? {
+              collected: collectFailedNodes($, "data-t-id").map((node) => {
+                  const $el = $(`[data-t-id="${node.id}"]`);
+                  markAudit($el.get(0), "selected");
+                  return {
+                      id: node.id,
+                      content: node.content,
+                      node: $el.get(0),
+                  };
+              }),
+              preservedUnits: [],
+          }
+        : collectNodesToTranslate();
+    const nodesToTranslate = collectResult.collected;
+    const preservedUnits = collectResult.preservedUnits;
 
     if (nodesToTranslate.length === 0) {
-        $("[data-t-id]").removeAttr("data-t-id");
-        return Promise.resolve($.xml());
+        if (resumeFailedOnly) {
+            // 续翻请求但没有任何失败标记：缓存不可信，不能当作已完成。
+            // 正常流程不会走到这里（调用方只在存在标记时才请求续翻），此处为兜底。
+            return Promise.resolve({
+                html: $.xml(),
+                status: "failed",
+                failedNodeIds: [],
+                totalNodes: 0,
+                translatedNodes: 0,
+                error: "resume requested but cache has no failure markers",
+            });
+        }
+        // 零节点也必须走覆盖率审计：可见文本未被处理时不得 complete
+        const coverage = mergePreviousCoverageGaps(
+            computeCoverageAudit({
+                selectedUnits: [],
+                preservedUnits,
+                failedNodeIds: [],
+                textNodeGaps: collectTextNodeGaps(),
+            }),
+        );
+        const zeroStatus = coverage.gaps.length > 0 ? "failed" : "complete";
+        const rawHtml = $.xml();
+        const cleanHtml = stripAuditMarkers(rawHtml);
+        return Promise.resolve({
+            html: cleanHtml,
+            cacheHtml: zeroStatus === "complete" ? cleanHtml : rawHtml,
+            status: zeroStatus,
+            failedNodeIds: [],
+            totalNodes: 0,
+            translatedNodes: 0,
+            coverage,
+        });
     }
 
     if (translationMode === "subtitle") {
@@ -1160,13 +1321,32 @@ const enqueueChapterTranslation = (
             const promptTemplate = getTranslationPromptTemplate(
                 translationMode,
             );
-            const bookBibleMarkdown = chapterTranslationOptions?.bookBible
-                ? formatBookBibleForPrompt(chapterTranslationOptions.bookBible)
+            const liveBookBible =
+                chapterTranslationOptions?.livingMemoryStore?.getSnapshot?.() ||
+                chapterTranslationOptions?.bookBible;
+            const bookBibleMarkdown = liveBookBible
+                ? formatBookBibleForPrompt(liveBookBible)
                 : "";
-            return promptTemplate.replace(
-                "{{TARGET_LANGUAGE}}",
-                translationConfig.targetLanguage,
-            )
+
+            let priorContextMarkdown = "";
+            const retriever = chapterTranslationOptions?.contextRetriever;
+            if (retriever && relevantEntries.length > 0) {
+                const hits = retriever.queryContext(
+                    relevantEntries.map(([term]) => term),
+                    2,
+                );
+                if (hits.length > 0) {
+                    priorContextMarkdown = `\nPRIOR CONTEXT (from earlier chapters; keep terminology and pronouns consistent):\n${hits
+                        .map((hit) => `- [${hit.chapterId}] ${hit.text}`)
+                        .join("\n")}\n`;
+                }
+            }
+
+            const basePrompt = promptTemplate
+                .replace(
+                    "{{TARGET_LANGUAGE}}",
+                    translationConfig.targetLanguage,
+                )
                 .replace(
                     "{{SOURCE_LANGUAGE}}",
                     translationConfig.sourceLanguage,
@@ -1178,7 +1358,11 @@ const enqueueChapterTranslation = (
                     "{{STYLE_GUIDE}}",
                     buildStyleGuide(translationConfig.targetLanguage),
                 )
+                .replace("{{PRIOR_CONTEXT_BLOCK}}", priorContextMarkdown)
                 .trim();
+            return priorContextMarkdown && !promptTemplate.includes("{{PRIOR_CONTEXT_BLOCK}}")
+                ? `${basePrompt}\n${priorContextMarkdown}`
+                : basePrompt;
         },
         singleNodePrompt:
             translationMode === "subtitle"
@@ -1301,11 +1485,7 @@ const enqueueChapterTranslation = (
         subtitleStatusLine(
             `    - ⚠️ [${roundLabel}] ${unresolvedIds.length} node(s) could not be translated and were left as source text.`,
         );
-        for (const unresolvedNode of unresolvedNodes) {
-            $(`[${processor.attrName}="${unresolvedNode.id}"]`).removeAttr(
-                processor.attrName,
-            );
-        }
+        // 保留 data-t-id 失败标记：章节状态标记为 partial，续跑时只补这些节点。
     };
 
     // 把首轮所有 batch 入队，返回一个 Promise chain：
@@ -1339,7 +1519,6 @@ const enqueueChapterTranslation = (
                 ? `    - ✅ Subtitle progress: ${subtitleProgress.completedNodes}/${subtitleProgress.totalNodes} cues (100%), batches=${subtitleProgress.completedBatches}, failedBatches=${subtitleProgress.failedBatches}`
                 : null,
         );
-        $("[data-t-id]").removeAttr("data-t-id");
         if (debugMode && skippedNodeCount > 0) {
             console.log(
                 `    - ⏭️ Skipped translation for ${skippedNodeCount} classified node(s); original content preserved.`,
@@ -1347,23 +1526,87 @@ const enqueueChapterTranslation = (
         }
 
         // EPUB 模式下：提取并格式化译者注，挂载 EPUB 3 脚注区
-        if (translationMode === "epub") {
+        const finalizeHtml = () => {
+            if (translationMode !== "epub") return $.xml();
             const chapterNotes = [];
+            const stableChapterId =
+                chapterTranslationOptions?.chapterId || chapterTitle;
+            // 续跑时已有脚注角标，从最大编号继续，避免重复 id
+            const startIndex = findMaxFootnoteIndex($.xml());
             $("p, li, h1, h2, h3, h4, h5, h6, caption").each((_, el) => {
                 const inner = $(el).html();
                 if (inner && inner.includes("<ws-note")) {
-                    $(el).html(extractAndFormatNotes(inner, chapterNotes, chapterTitle));
+                    $(el).html(
+                        extractAndFormatNotes(
+                            inner,
+                            chapterNotes,
+                            stableChapterId,
+                            { startIndex },
+                        ),
+                    );
                 }
             });
             if (chapterNotes.length > 0) {
                 console.log(`    - 📑 [${chapterTitle}] Embedded ${chapterNotes.length} cultural footnote(s) (<aside epub:type="footnote">).`);
                 return appendFootnotesSection($.xml(), chapterNotes);
             }
-        }
+            return $.xml();
+        };
 
-        return $.xml();
+        const remaining = collectFailedNodes($, "data-t-id");
+        const totalNodes = nodesToTranslate.length;
+        const translatedNodes = totalNodes - remaining.length;
+        const coverage = mergePreviousCoverageGaps(
+            computeCoverageAudit({
+                selectedUnits: nodesToTranslate,
+                preservedUnits,
+                failedNodeIds: remaining.map((node) => node.id),
+                textNodeGaps: collectTextNodeGaps(),
+            }),
+        );
+        const hasCoverageGaps = coverage.gaps.length > 0;
+        const status =
+            remaining.length === 0 && !hasCoverageGaps
+                ? "complete"
+                : translatedNodes === 0
+                  ? "failed"
+                  : "partial";
+        const failedNodeIds = remaining.map((node) => node.id);
+        if (status === "complete") {
+            $("[data-t-id]").removeAttr("data-t-id");
+        }
+        // 缓存 partial 章节时保留审计标记，续跑才能恢复「已译/已保留」状态；
+        // 输出与 complete 缓存使用剥离后的干净 HTML。
+        const finalizedHtml = finalizeHtml();
+        const cleanHtml = stripAuditMarkers(finalizedHtml);
+
+        return {
+            html: cleanHtml,
+            cacheHtml: status === "complete" ? cleanHtml : finalizedHtml,
+            status,
+            failedNodeIds,
+            totalNodes,
+            translatedNodes,
+            coverage,
+        };
     });
 };
+
+const stripAuditMarkers = (html) => {
+    const $ = loadHtml(html);
+    $("[data-wasabi-audit]").removeAttr("data-wasabi-audit");
+    return $.xml();
+};
+
+const stripTranslationMarkers = (html) => {
+    const $ = loadHtml(html);
+    $("[data-t-id]").removeAttr("data-t-id");
+    $("[data-wasabi-audit]").removeAttr("data-wasabi-audit");
+    return $.xml();
+};
+
+const hasTranslationMarkers = (html) =>
+    typeof html === "string" && /data-t-id\s*=/.test(html);
 
 // 兼容旧调用（headings.js 等地方可能直接调用）
 export const translateHtmlContent = async (
@@ -1418,80 +1661,313 @@ export const performTranslation = async (
     );
     let skipped = 0;
     const total = sortedChapters.length;
+    const chapterStatus = cache.loadChapterStatus();
+    // 注册术语对照，供双语前文检索使用
+    bookTranslationOptions?.contextRetriever?.setGlossary?.(glossary);
 
-    // 过滤掉已缓存和 TOC，剩余章节同时入队
+    // 只有「状态为 complete 且 HTML 无失败标记」的缓存才允许跳过；
+    // partial / failed / 状态缺失 / 状态与 HTML 不一致 一律进入续翻。
     const pending = [];
+    const results = new Map();
     for (let i = 0; i < total; i++) {
         const ch = sortedChapters[i];
         if (ch.isTOC) continue;
 
         const cached = cache.load(ch.id);
         if (cached) {
-            chapterMap.get(ch.id).html = cached;
-            skipped++;
+            const cachedStatus = chapterStatus[ch.id]?.status;
+            const cachedDigest = chapterStatus[ch.id]?.htmlDigest;
+            const digestOk =
+                !cachedDigest || cachedDigest === computeTextDigest(cached);
+            if (
+                cachedStatus === "complete" &&
+                !hasTranslationMarkers(cached) &&
+                digestOk
+            ) {
+                chapterMap.get(ch.id).html = cached;
+                skipped++;
+                // 缓存成功章节也进入结果聚合，续跑状态/counts 才准确
+                results.set(ch.id, {
+                    id: ch.id,
+                    title: ch.title,
+                    status: "complete",
+                    failedNodeIds: [],
+                    coverage: chapterStatus[ch.id]?.coverage ?? null,
+                    cached: true,
+                });
+                // 缓存恢复的章节也进入前文检索索引，保证续跑与新跑上下文一致
+                const retriever = bookTranslationOptions?.contextRetriever;
+                if (retriever?.indexChapter) {
+                    try {
+                        retriever.indexChapter(ch.id, loadHtml(cached).text());
+                    } catch {
+                        // 索引失败不影响翻译流程
+                    }
+                }
+                console.log(
+                    `⏭️  [${i + 1}/${total}] Skipped (verified cached): "${ch.title}"`,
+                );
+                continue;
+            }
+            if (!digestOk) {
+                console.log(
+                    `♻️ [${i + 1}/${total}] Cache digest mismatch for "${ch.title}"; retranslating source.`,
+                );
+                pending.push({
+                    ch,
+                    index: i,
+                    resumeFailedOnly: false,
+                    sourceHtml: ch.html,
+                });
+                continue;
+            }
+            if (hasTranslationMarkers(cached)) {
+                console.log(
+                    `🔁 [${i + 1}/${total}] Resuming ${cachedStatus || "unverified"} cache: "${ch.title}" (${chapterStatus[ch.id]?.failedNodeIds?.length ?? "?"} failed node(s))`,
+                );
+                pending.push({
+                    ch,
+                    index: i,
+                    resumeHtml: cached,
+                    resumeFailedOnly: true,
+                    sourceHtml: ch.html,
+                });
+                continue;
+            }
+            // 状态非 complete（或缺失）但 HTML 没有任何失败标记：缓存不可信，
+            // 不能零请求判定完成，改为重翻原始章节。
             console.log(
-                `⏭️  [${i + 1}/${total}] Skipped (cached): "${ch.title}"`,
+                `♻️ [${i + 1}/${total}] Discarding unverifiable cache (status=${cachedStatus || "missing"}, no failure markers); retranslating source: "${ch.title}"`,
             );
+            pending.push({
+                ch,
+                index: i,
+                resumeFailedOnly: false,
+                sourceHtml: ch.html,
+            });
             continue;
         }
 
-        pending.push({ ch, index: i });
+        pending.push({
+            ch,
+            index: i,
+            resumeFailedOnly: false,
+            sourceHtml: ch.html,
+        });
     }
 
-    // 所有待翻译章节同时入队，各自拿到自己的完成 Promise
-    const chapterPromises = pending.map(({ ch, index }) => {
-        const translationPromise = enqueueChapterTranslation(
-            ch.html,
-            ch.title,
-            glossary,
-            translationConfig,
-            batchQueue,
-            logger,
-            referencedIds,
-            definedClasses,
-            translationMode,
-            debugMode,
-            {
-                ...(bookTranslationOptions?.chapterModes?.[ch.id] || {}),
-                bookBible: bookTranslationOptions?.bookBible,
-            },
-        );
+    const memoryTasks = [];
+    const CHAPTER_WINDOW_SIZE = 4;
+    // 章节窗口调度：窗口内批次并发，窗口之间串行并提交记忆快照
+    const runChapter = async ({
+        ch,
+        index,
+        resumeHtml,
+        resumeFailedOnly,
+        sourceHtml,
+    }) => {
+            const translationPromise = enqueueChapterTranslation(
+                resumeHtml ?? ch.html,
+                ch.title,
+                glossary,
+                translationConfig,
+                batchQueue,
+                logger,
+                referencedIds,
+                definedClasses,
+                translationMode,
+                debugMode,
+                {
+                    ...(bookTranslationOptions?.chapterModes?.[ch.id] || {}),
+                    bookBible: bookTranslationOptions?.bookBible,
+                    livingMemoryStore: bookTranslationOptions?.livingMemoryStore,
+                    contextRetriever: bookTranslationOptions?.contextRetriever,
+                    chapterId: ch.id,
+                    previousCoverageGaps:
+                        chapterStatus[ch.id]?.coverage?.gaps || [],
+                    resumeFailedOnly,
+                },
+            );
 
-        // 每章独立 then：完成后立即写 cache，不等其他章节
-        return translationPromise
-            .then((translatedHtml) => {
-                if (chapterMap.has(ch.id)) {
-                    chapterMap.get(ch.id).html = translatedHtml;
-                    cache.save(ch.id, translatedHtml);
-                    console.log(
-                        `✅ [${index + 1}/${total}] Done: "${ch.title}"`,
-                    );
+            // 每章独立 then：完成后立即写 cache，不等其他章节
+            return translationPromise
+                .then((result) => {
+                    const status =
+                        result?.status === "failed"
+                            ? "failed"
+                            : result?.status === "partial"
+                              ? "partial"
+                              : "complete";
+                    const failedNodeIds = result?.failedNodeIds || [];
+                    // 摘要必须与缓存保存的内容完全一致，否则续跑会误判缓存损坏
+                    const cacheHtml = result.cacheHtml ?? result.html;
+                    chapterStatus[ch.id] = {
+                        status,
+                        failedNodeIds,
+                        totalNodes: result?.totalNodes ?? 0,
+                        translatedNodes: result?.translatedNodes ?? 0,
+                        coverage: result?.coverage ?? null,
+                        htmlDigest: computeTextDigest(cacheHtml),
+                        updatedAt: new Date().toISOString(),
+                    };
+                    // 每章完成即落盘状态，进程中断后仍可续跑
+                    cache.saveChapterStatus(chapterStatus);
+                    results.set(ch.id, {
+                        id: ch.id,
+                        title: ch.title,
+                        status,
+                        failedNodeIds,
+                        coverage: result?.coverage ?? null,
+                    });
 
-                    // 异步触发增量记忆提取 (Living Memory Extractor)
-                    if (bookTranslationOptions?.livingMemoryStore) {
-                        extractChapterMemory(
-                            translatedHtml,
-                            bookTranslationOptions.livingMemoryStore,
-                            aiProvider,
-                            logger,
-                            translationConfig,
-                            ch.title,
-                        );
+                    if (chapterMap.has(ch.id)) {
+                        chapterMap.get(ch.id).html =
+                            status === "complete"
+                                ? result.html
+                                : stripTranslationMarkers(result.html);
+                        // 缓存保留 data-t-id 失败标记与审计标记，供下次续跑恢复状态
+                        cache.save(ch.id, cacheHtml);
+
+                        if (status === "complete") {
+                            console.log(
+                                `✅ [${index + 1}/${total}] Done: "${ch.title}"`,
+                            );
+
+                            // 已译章节进入前文检索索引
+                            const retriever =
+                                bookTranslationOptions?.contextRetriever;
+                            if (retriever?.indexChapter) {
+                                try {
+                                    retriever.indexChapter(
+                                        ch.id,
+                                        loadHtml(result.html).text(),
+                                    );
+                                } catch {
+                                    // 索引失败不影响翻译流程
+                                }
+                            }
+
+                            // 增量记忆提取：收集 Promise，翻译结束后统一等待
+                            if (bookTranslationOptions?.livingMemoryStore) {
+                                memoryTasks.push(
+                                    extractChapterMemory(
+                                        result.html,
+                                        bookTranslationOptions.livingMemoryStore,
+                                        aiProvider,
+                                        logger,
+                                        translationConfig,
+                                        ch.title,
+                                        {
+                                            sourceText: (() => {
+                                                try {
+                                                    return loadHtml(
+                                                        sourceHtml || "",
+                                                    ).text();
+                                                } catch {
+                                                    return "";
+                                                }
+                                            })(),
+                                            chapterId: ch.id,
+                                        },
+                                    ),
+                                );
+                            }
+                        } else if (status === "partial") {
+                            const coverageGaps =
+                                result?.coverage?.gaps?.length ?? 0;
+                            console.log(
+                                `⚠️ [${index + 1}/${total}] Partial: "${ch.title}" (${failedNodeIds.length} node(s) failed${coverageGaps > 0 ? `, ${coverageGaps} coverage gap(s)` : ""}, cache kept for resume)`,
+                            );
+                        } else {
+                            console.log(
+                                `❌ [${index + 1}/${total}] Failed: "${ch.title}" (all ${failedNodeIds.length} node(s) failed, cache kept for resume)`,
+                            );
+                        }
                     }
-                }
-            })
-            .catch((e) => {
-                logger.write(
-                    "ERROR",
-                    `Chapter "${ch.title}" Translation Failed: ${e.stack || e.message}`,
-                );
-                console.log(`❌ [${index + 1}/${total}] Failed: "${ch.title}"`);
-            });
-    });
+                })
+                .catch((e) => {
+                    chapterStatus[ch.id] = {
+                        status: "failed",
+                        failedNodeIds: [],
+                        error: String(e?.message || e),
+                        updatedAt: new Date().toISOString(),
+                    };
+                    cache.saveChapterStatus(chapterStatus);
+                    results.set(ch.id, {
+                        id: ch.id,
+                        title: ch.title,
+                        status: "failed",
+                        failedNodeIds: [],
+                    });
+                    logger.write(
+                        "ERROR",
+                        `Chapter "${ch.title}" Translation Failed: ${e.stack || e.message}`,
+                    );
+                    console.log(`❌ [${index + 1}/${total}] Failed: "${ch.title}"`);
+                });
+    };
 
-    await Promise.all(chapterPromises);
+    for (let start = 0; start < pending.length; start += CHAPTER_WINDOW_SIZE) {
+        const windowItems = pending.slice(start, start + CHAPTER_WINDOW_SIZE);
+        await Promise.all(windowItems.map((item) => runChapter(item)));
+        // 每个窗口结束提交记忆快照，降低完成顺序不确定性
+        if (memoryTasks.length > 0) {
+            await Promise.all(memoryTasks.splice(0));
+        }
+        cache.saveChapterStatus(chapterStatus);
+    }
+    cache.saveChapterStatus(chapterStatus);
+
+    // 等待增量记忆提取收敛，避免后处理/缓存清理与提取任务竞争
+    if (memoryTasks.length > 0) {
+        await Promise.all(memoryTasks);
+    }
 
     if (skipped > 0) {
         console.log(`  ℹ️  ${skipped} chapter(s) restored from cache.`);
     }
+
+    const chapters = [...results.values()];
+    const { status, failedChapters, partialChapters } =
+        aggregateTranslationResults(chapters);
+
+    return {
+        status,
+        failedChapters,
+        partialChapters,
+        chapters,
+    };
+};
+
+/**
+ * 统一状态聚合：所有入口（单阶段、分阶段合并）共用同一个 reducer。
+ * - 有失败但仍有成功/部分成功 → partial
+ * - 全部失败 → failed
+ * - 其余 → complete
+ */
+export const aggregateTranslationResults = (chapters) => {
+    const list = Array.isArray(chapters) ? chapters : [];
+    const failedChapters = list.filter((item) => item.status === "failed");
+    const partialChapters = list.filter((item) => item.status === "partial");
+    const successfulCount = list.filter(
+        (item) => item.status === "complete" || item.status === "partial",
+    ).length;
+    const status =
+        failedChapters.length > 0 && successfulCount === 0
+            ? "failed"
+            : failedChapters.length > 0 || partialChapters.length > 0
+              ? "partial"
+              : "complete";
+    return { status, failedChapters, partialChapters };
+};
+
+/**
+ * 合并分阶段翻译结果（正文阶段 + 前言阶段）。
+ */
+export const mergeTranslationReports = (reports) => {
+    const list = (reports || []).filter(Boolean);
+    const chapters = list.flatMap((report) => report.chapters || []);
+    const { status, failedChapters, partialChapters } =
+        aggregateTranslationResults(chapters);
+    return { status, failedChapters, partialChapters, chapters };
 };

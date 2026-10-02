@@ -57,16 +57,66 @@ export const extractPdfToJson = async (
     return JSON.parse(fs.readFileSync(jsonPath, "utf8"));
 };
 
+export const readPdfFillResult = (resultJsonPath, requestedOutputPath) => {
+    if (!resultJsonPath) {
+        // 旧协议：无法确认实际产物路径，明确标注兼容模式
+        return {
+            outputPath: requestedOutputPath,
+            usedFallback: false,
+            protocol: "legacy",
+        };
+    }
+    if (!fs.existsSync(resultJsonPath)) {
+        throw new Error(
+            `PDF fill result file missing: ${resultJsonPath}. Refusing to guess the actual output path.`,
+        );
+    }
+    let parsed = null;
+    try {
+        parsed = JSON.parse(fs.readFileSync(resultJsonPath, "utf8"));
+    } catch {
+        throw new Error(
+            `PDF fill result file is corrupt: ${resultJsonPath}.`,
+        );
+    }
+    if (
+        !parsed ||
+        typeof parsed.actualOutputPath !== "string" ||
+        !parsed.actualOutputPath
+    ) {
+        throw new Error(
+            `PDF fill result file has an invalid schema: ${resultJsonPath}.`,
+        );
+    }
+    return {
+        outputPath: parsed.actualOutputPath,
+        usedFallback: Boolean(parsed.usedFallback),
+        protocol: "v1",
+    };
+};
+
 export const fillPdfFromJson = async (
     inputPath,
     translatedJsonPath,
     outputPath,
     logger,
+    resultJsonPath = null,
 ) => {
     fs.mkdirSync(path.dirname(outputPath), { recursive: true });
     const args = ["fill", inputPath, translatedJsonPath, outputPath];
+    if (resultJsonPath) {
+        fs.mkdirSync(path.dirname(resultJsonPath), { recursive: true });
+        args.push("--result-json", resultJsonPath);
+    }
     await runPython(args, logger, { streamOutputToTerminal: true });
-    return outputPath;
+    const result = readPdfFillResult(resultJsonPath, outputPath);
+    if (result.usedFallback) {
+        logger?.write?.(
+            "WARN",
+            `PDF target was locked; actual output written to fallback path: ${result.outputPath}`,
+        );
+    }
+    return result;
 };
 
 export const validatePdfOutput = async (

@@ -1,11 +1,13 @@
+import crypto from "crypto";
 import fs from "fs";
 import path from "path";
 
 export const createLogger = (logDir) => {
     if (!fs.existsSync(logDir)) fs.mkdirSync(logDir, { recursive: true });
 
-    const runId = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
-    const logFile = path.join(logDir, `translation_${runId}.log`);
+    const timestamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+    const runId = crypto.randomUUID().slice(0, 8);
+    const logFile = path.join(logDir, `translation_${timestamp}_${runId}.log`);
 
     const write = (type, content) => {
         const timestamp = new Date().toLocaleString();

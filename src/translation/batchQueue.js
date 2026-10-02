@@ -1,8 +1,13 @@
 import Queue from "better-queue";
 import * as cheerio from "cheerio";
 import { cleanAIResponse } from "../utils.js";
-import { encodeInlineTags, decodeInlineTags } from "../content/inlineSlots.js";
+import {
+    encodeInlineTags,
+    decodeInlineTagsDetailed,
+} from "../content/inlineSlots.js";
 import { shouldTriggerCritic, reviewAndCorrectNode } from "../content/critic.js";
+import { validateProtectedStructure } from "./structureGuard.js";
+import { classifyProviderError } from "./aiProvider.js";
 
 const previewText = (text, maxLength = 300) => {
     const normalized = String(text ?? "").replace(/\s+/g, " ").trim();
@@ -62,31 +67,29 @@ export const createBatchQueue = (aiProvider, logger) => {
                 try {
                     attempts++;
 
-                    const mergeRegex =
-                        /([A-Za-z])<(small|span|strong|em)[^>]*>([\s\S]*?)<\/\2>/gi;
-
-                    // 对每个节点的行内排版标签进行占位符安全编码
+                    // 对每个节点的行内排版标签进行占位符安全编码（不再做有损标签合并）
                     const nodeSlotMetadata = new Map();
+                    const encodeNode = (content) => {
+                        const encoded = encodeInlineTags(content);
+                        if (encoded.incomplete) {
+                            const incompleteError = new Error(
+                                "Inline tag encoding incomplete; aborting batch before sending.",
+                            );
+                            incompleteError.responsePreview = previewText(content);
+                            throw incompleteError;
+                        }
+                        return encoded;
+                    };
                     const batchInput =
                         batch.length === 1 && processor.singleNodePrompt
                             ? (() => {
-                                  const preProcessed = batch[0].content.replace(
-                                      mergeRegex,
-                                      (match, p1, p2, p3) =>
-                                          !p3.includes("<") ? p1 + p3 : match,
-                                  );
-                                  const encoded = encodeInlineTags(preProcessed);
+                                  const encoded = encodeNode(batch[0].content);
                                   nodeSlotMetadata.set(batch[0].id, encoded);
                                   return encoded.encodedText;
                               })()
                             : batch
                                   .map((n) => {
-                                      const preProcessedContent = n.content.replace(
-                                          mergeRegex,
-                                          (match, p1, p2, p3) =>
-                                              !p3.includes("<") ? p1 + p3 : match,
-                                      );
-                                      const encoded = encodeInlineTags(preProcessedContent);
+                                      const encoded = encodeNode(n.content);
                                       nodeSlotMetadata.set(n.id, encoded);
                                       return `<node id="${n.id}">${encoded.encodedText}</node>`;
                                   })
@@ -110,6 +113,69 @@ export const createBatchQueue = (aiProvider, logger) => {
                         shouldUseSingleNodePlainTextFallback(batch, rawResponse)
                             ? String(rawResponse ?? "").trim()
                             : null;
+
+                    // 统一校验出口：slot 完整性 + 受保护结构（id/href/class/嵌套）
+                    const restoreAndValidate = (node, translatedFragment) => {
+                        const slotInfo = nodeSlotMetadata.get(node.id);
+                        if (!slotInfo) {
+                            const guard = validateProtectedStructure(
+                                node.content,
+                                translatedFragment,
+                            );
+                            if (!guard.ok) {
+                                const structureError = new Error(
+                                    `Node ${node.id} protected structure changed: ${JSON.stringify({
+                                        missing: guard.missingAttributes,
+                                        unexpected: guard.unexpectedAttributes,
+                                        missingNesting: guard.missingNesting,
+                                        unexpectedNesting: guard.unexpectedNesting,
+                                    })}`,
+                                );
+                                structureError.responsePreview =
+                                    previewText(translatedFragment);
+                                throw structureError;
+                            }
+                            return translatedFragment;
+                        }
+
+                        const decoded = decodeInlineTagsDetailed(
+                            translatedFragment,
+                            slotInfo.slotMap,
+                            slotInfo.slotTag,
+                        );
+                        if (
+                            decoded.missingSlots.length > 0 ||
+                            decoded.unknownSlots.length > 0 ||
+                            decoded.duplicateSlots.length > 0 ||
+                            decoded.residualSlots > 0
+                        ) {
+                            const slotError = new Error(
+                                `Node ${node.id} slot integrity failed: missing=${decoded.missingSlots.join(",")} unknown=${decoded.unknownSlots.join(",")} duplicate=${decoded.duplicateSlots.join(",")} residual=${decoded.residualSlots}`,
+                            );
+                            slotError.responsePreview =
+                                previewText(translatedFragment);
+                            throw slotError;
+                        }
+
+                        const guard = validateProtectedStructure(
+                            node.content,
+                            decoded.html,
+                        );
+                        if (!guard.ok) {
+                            const structureError = new Error(
+                                `Node ${node.id} protected structure changed: ${JSON.stringify({
+                                    missing: guard.missingAttributes,
+                                    unexpected: guard.unexpectedAttributes,
+                                    missingNesting: guard.missingNesting,
+                                    unexpectedNesting: guard.unexpectedNesting,
+                                })}`,
+                            );
+                            structureError.responsePreview =
+                                previewText(translatedFragment);
+                            throw structureError;
+                        }
+                        return decoded.html;
+                    };
 
                     for (const node of batch) {
                         const $node = $response(`node[id="${node.id}"]`);
@@ -136,19 +202,15 @@ export const createBatchQueue = (aiProvider, logger) => {
                                     previewText(rawResponse);
                                 throw metaNoteError;
                             }
-                            const slotInfo = nodeSlotMetadata.get(node.id);
-                            const restoredContent = slotInfo
-                                ? decodeInlineTags(
-                                      singleNodePlainTextFallback,
-                                      slotInfo.slotMap,
-                                      slotInfo.slotTag,
-                                  )
-                                : singleNodePlainTextFallback;
-                            updates.push({
-                                nodeId: node.id,
-                                processedContent: restoredContent,
-                            });
-                            continue;
+                                const restoredContent = restoreAndValidate(
+                                    node,
+                                    singleNodePlainTextFallback,
+                                );
+                                updates.push({
+                                    nodeId: node.id,
+                                    processedContent: restoredContent,
+                                });
+                                continue;
                         }
                         missingNodeIds.push(node.id);
                         continue;
@@ -185,15 +247,11 @@ export const createBatchQueue = (aiProvider, logger) => {
                         );
                     }
 
-                    // 解码占位符回填为真实出版级 HTML
-                    const slotInfo = nodeSlotMetadata.get(node.id);
-                    const restoredContent = slotInfo
-                        ? decodeInlineTags(
-                              finalContent,
-                              slotInfo.slotMap,
-                              slotInfo.slotTag,
-                          )
-                        : finalContent;
+                    // 统一校验出口：slot 完整性 + 受保护结构（批量、单节点回退、Critic 共用）
+                    const restoredContent = restoreAndValidate(
+                        node,
+                        finalContent,
+                    );
 
                     try {
                         cheerio.load(restoredContent, { xmlMode: true });
@@ -239,10 +297,19 @@ export const createBatchQueue = (aiProvider, logger) => {
                     } catch {}
                     cb(null);
                 } catch (e) {
+                    const classification = classifyProviderError(e);
                     logger.write(
                         "ERROR",
-                        `Batch Queue Attempt ${attempts} Failed: ${e.stack || e.message}${e.responsePreview ? `\nResponse Preview: ${e.responsePreview}` : ""}`,
+                        `Batch Queue Attempt ${attempts} Failed [${classification.category}]: ${e.stack || e.message}${e.responsePreview ? `\nResponse Preview: ${e.responsePreview}` : ""}`,
                     );
+                    // 认证/模型不存在等永久错误快速失败，不做无谓重试
+                    if (!classification.retryable) {
+                        try {
+                            onTaskFailure?.(batch, e);
+                        } catch {}
+                        cb(e);
+                        return;
+                    }
                     if (attempts >= MAX_ATTEMPTS) {
                         try {
                             onTaskFailure?.(batch, e);

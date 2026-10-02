@@ -17,6 +17,23 @@ const decodeHtml = (value) =>
 const SRT_TIME_RANGE_REGEX =
     /^(\d{2}:\d{2}:\d{2},\d{3})\s+-->\s+(\d{2}:\d{2}:\d{2},\d{3})(?:\s+(.*))?$/;
 
+const SRT_TIME_REGEX = /^(\d{2}):(\d{2}):(\d{2}),(\d{3})$/;
+
+export const parseSrtTimeToMs = (value) => {
+    const match = SRT_TIME_REGEX.exec(String(value ?? "").trim());
+    if (!match) {
+        throw new Error(`Invalid SRT time value: "${value}".`);
+    }
+    const hours = Number.parseInt(match[1], 10);
+    const minutes = Number.parseInt(match[2], 10);
+    const seconds = Number.parseInt(match[3], 10);
+    const milliseconds = Number.parseInt(match[4], 10);
+    if (minutes > 59 || seconds > 59 || milliseconds > 999) {
+        throw new Error(`Invalid SRT time components: "${value}".`);
+    }
+    return ((hours * 60 + minutes) * 60 + seconds) * 1000 + milliseconds;
+};
+
 const sanitizeCueText = (value, fallback = "") => {
     const normalized = String(value ?? "")
         .replace(/\r\n/g, "\n")
@@ -55,14 +72,31 @@ export const parseSrt = (content) => {
         let timeLineIndex = 0;
         if (!lines[0].includes("-->")) {
             const firstLine = lines[0].trim();
-            cueIdentifier = /^\d+$/.test(firstLine) ? null : firstLine || null;
-            timeLineIndex = 1;
+            if (/^\d+$/.test(firstLine)) {
+                // 标准序号行；其后可能还有一行非数字标识
+                timeLineIndex = 1;
+                if (lines[1] && !lines[1].includes("-->")) {
+                    cueIdentifier = lines[1].trim() || null;
+                    timeLineIndex = 2;
+                }
+            } else {
+                cueIdentifier = firstLine || null;
+                timeLineIndex = 1;
+            }
         }
 
         const timeLine = lines[timeLineIndex]?.trim();
         const match = timeLine?.match(SRT_TIME_RANGE_REGEX);
         if (!match) {
             throw new Error(`Invalid SRT time range at block ${index + 1}.`);
+        }
+
+        const startMs = parseSrtTimeToMs(match[1]);
+        const endMs = parseSrtTimeToMs(match[2]);
+        if (startMs > endMs) {
+            throw new Error(
+                `Invalid SRT time range at block ${index + 1}: start is after end.`,
+            );
         }
 
         const textLines = lines.slice(timeLineIndex + 1);
@@ -150,7 +184,11 @@ export const applyTranslatedHtmlToSubtitleJson = (subtitleJson, translatedHtml) 
 };
 
 export const serializeSrt = (subtitleJson, { preferTranslated = true } = {}) => {
-    const cues = Array.isArray(subtitleJson?.cues) ? subtitleJson.cues : [];
+    const cues = Array.isArray(subtitleJson)
+        ? subtitleJson
+        : Array.isArray(subtitleJson?.cues)
+          ? subtitleJson.cues
+          : [];
     return cues
         .map((cue, index) => {
             const text = sanitizeCueText(
@@ -159,14 +197,17 @@ export const serializeSrt = (subtitleJson, { preferTranslated = true } = {}) => 
                     : cue.sourceText || "",
                 cue.sourceText || "",
             );
-            const lines = [
-                String(index + 1),
-                `${cue.start} --> ${cue.end}${cue.settings ? ` ${cue.settings}` : ""}`,
-                text,
-            ];
-            if (cue.cueIdentifier && !/^\d+$/.test(String(cue.cueIdentifier).trim())) {
-                lines.splice(1, 0, cue.cueIdentifier);
+            const identifier = String(cue.cueIdentifier || "").trim();
+            const lines = [];
+            if (identifier && !/^\d+$/.test(identifier)) {
+                lines.push(identifier);
+            } else {
+                lines.push(String(index + 1));
             }
+            lines.push(
+                `${cue.start} --> ${cue.end}${cue.settings ? ` ${cue.settings}` : ""}`,
+            );
+            lines.push(text);
             return lines.join("\n").trimEnd();
         })
         .join("\n\n");

@@ -418,3 +418,32 @@ SRT 流程：
 10. `src/pdf/pdfBridge.js` 与 `src/pdf/translate_pdf.py`
 
 这样能先理解系统边界，再进入各个复杂子模块。
+
+## 16. 任务契约与状态模块（2026-10 起）
+
+为解决「请求结束 ≠ 翻译完成 ≠ 输出合格」的混淆，新增三层显式契约：
+
+### 16.1 内容契约
+
+- `src/content/content-classifier.js`：Unicode 判定（`\p{L}/\p{N}/\p{S}/\p{P}`），输出 `action`（兼容）与 `decision`（`translate/preserve/uncertain`）。
+- `src/translation/coverage.js`：逐单元覆盖率审计；可疑保留项计入 `gaps`，有 gap 不得 complete。
+- `src/translation/structureGuard.js`：受保护属性（id/href/class/name/src/epub:type）与嵌套关系多重集校验，批量/单节点/Critic 共用。
+- `src/content/inlineSlots.js`：编解码无固定上限，返回 missing/unknown/duplicate/residual 报告。
+
+### 16.2 任务契约
+
+- `src/translation/translator.js`：章节状态 `complete/partial/failed`；`aggregateTranslationResults` 统一 reducer；失败节点保留 `data-t-id` 供续跑；章节窗口调度（默认 4 章一窗）。
+- `src/translation/requestLimiter.js` + `aiProvider.classifyProviderError`：共享限流、超时取消、永久错误快速失败。
+- `src/support/cache.js`：原子写、损坏隔离、章节 `htmlDigest`、任务锁。
+- `src/support/taskIdentity.js`：内容摘要（不含 mtime）+ 快速指纹。
+
+### 16.3 产物契约
+
+- `src/support/jobRuntime.js`：`createJobCache` / `finalizeJobArtifacts` / `buildJobResult`。
+- 四种 Job 返回 `{ translationStatus, validationStatus, counts, outputPath, reportPath, cacheDir, logFile, archivedInputPath }`。
+- 仅 `translation=complete && validation=ok` 清理缓存与日志；否则保留。
+
+### 16.4 验收入口
+
+- `npm test` → `tests/run_all.mjs`：content-classifier / structure-fidelity / recovery-contracts / srt / translation-status / planning-phases / epub-doctor（书籍样本可选跳过）。
+

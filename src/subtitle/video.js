@@ -1,6 +1,6 @@
-import { spawn } from "child_process";
 import fs from "fs";
 import path from "path";
+import { runProcess as runSharedProcess } from "../support/process.js";
 import {
     getSubtitleLanguageCode,
     inferLanguageFromText,
@@ -20,45 +20,29 @@ const SUPPORTED_TEXT_SUBTITLE_CODECS = new Set([
 
 const EXTERNAL_SUBTITLE_EXTENSIONS = new Set([".srt", ".ass", ".ssa", ".vtt"]);
 
-const runProcess = (command, args, logger) =>
-    new Promise((resolve, reject) => {
-        const child = spawn(command, args, {
-            stdio: ["ignore", "pipe", "pipe"],
-            windowsHide: true,
-        });
-
-        let stdout = "";
-        let stderr = "";
-
-        child.stdout.on("data", (chunk) => {
-            stdout += chunk.toString();
-        });
-        child.stderr.on("data", (chunk) => {
-            stderr += chunk.toString();
-        });
-        child.on("error", (error) => {
-            reject(error);
-        });
-        child.on("close", (code) => {
-            if (stdout.trim()) {
-                logger?.write("INFO", `Process stdout (${command}):\n${stdout}`);
-            }
-            if (stderr.trim()) {
-                logger?.write("WARN", `Process stderr (${command}):\n${stderr}`);
-            }
-
-            if (code === 0) {
-                resolve({ stdout, stderr });
-                return;
-            }
-
-            reject(
-                new Error(
-                    `${command} exited with code ${code}.${stderr ? `\n${stderr}` : ""}`,
-                ),
-            );
-        });
+const runProcess = async (command, args, logger) => {
+    const result = await runSharedProcess(command, args, {
+        timeoutMs: 10 * 60 * 1000,
     });
+    if (result.stdout.trim()) {
+        logger?.write("INFO", `Process stdout (${command}):\n${result.stdout}`);
+    }
+    if (result.stderr.trim()) {
+        logger?.write("WARN", `Process stderr (${command}):\n${result.stderr}`);
+    }
+    if (result.timedOut) {
+        const error = new Error(`${command} timed out.`);
+        error.category = "timeout";
+        error.stderr = result.stderr;
+        throw error;
+    }
+    if (result.code === 0) {
+        return { stdout: result.stdout, stderr: result.stderr };
+    }
+    throw new Error(
+        `${command} exited with code ${result.code}.${result.stderr ? `\n${result.stderr}` : ""}`,
+    );
+};
 
 const getStreamLanguage = (stream) => {
     if (stream?.resolvedLanguage) return stream.resolvedLanguage;
@@ -172,16 +156,24 @@ export const selectSubtitleStream = ({
     return decorated.sort((a, b) => Number(a.index || 0) - Number(b.index || 0))[0];
 };
 
-export const assertSubtitleCodecSupported = (stream) => {
+export const isSubtitleCodecSupported = (stream) => {
     if (stream?.kind === "external") {
         const ext = path.extname(stream.path || "").slice(1).toLowerCase();
-        if (EXTERNAL_SUBTITLE_EXTENSIONS.has(`.${ext}`)) return;
+        return EXTERNAL_SUBTITLE_EXTENSIONS.has(`.${ext}`);
+    }
+    const codecName = String(stream?.codec_name || "").toLowerCase();
+    return SUPPORTED_TEXT_SUBTITLE_CODECS.has(codecName);
+};
+
+export const assertSubtitleCodecSupported = (stream) => {
+    if (isSubtitleCodecSupported(stream)) return;
+    if (stream?.kind === "external") {
+        const ext = path.extname(stream.path || "").slice(1).toLowerCase();
         throw new Error(
             `Unsupported external subtitle format "${ext || "unknown"}".`,
         );
     }
     const codecName = String(stream?.codec_name || "").toLowerCase();
-    if (SUPPORTED_TEXT_SUBTITLE_CODECS.has(codecName)) return;
     throw new Error(
         `Unsupported subtitle codec "${codecName || "unknown"}". Only text-based subtitle tracks are supported right now.`,
     );
