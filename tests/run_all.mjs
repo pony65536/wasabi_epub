@@ -13,6 +13,8 @@ const suites = [
     { name: "content classifier", file: "test_content_classifier.mjs" },
     { name: "structure fidelity", file: "test_structure_fidelity.mjs" },
     { name: "recovery contracts", file: "test_recovery_contracts.mjs" },
+    { name: "model routing", file: "test_model_routing.mjs" },
+    { name: "model gateway", file: "test_model_gateway.mjs" },
     { name: "srt", file: "test_srt.mjs" },
     { name: "translation status", file: "test_translation_status.mjs" },
     { name: "planning phases", file: "test_planning_phases.mjs" },

@@ -58,8 +58,14 @@ const createStubQueue = (shouldFailBatch = () => false, calls = null) => ({
                         $target
                             .html(`[译]${node.content}`)
                             .removeAttr(task.processor.attrName);
+                        const record = task.processor.planState?.get(node.id);
+                        if (record) record.state = "written";
                     }
-                    emitter.emit("finish");
+                    emitter.emit("finish", {
+                        writtenNodeIds: task.batch.map((node) => node.id),
+                        alreadyWrittenNodeIds: [],
+                        failedNodes: [],
+                    });
                 } catch (error) {
                     emitter.emit("failed", error);
                 }
@@ -220,11 +226,64 @@ const run = async () => {
     );
     const staleHtml = staleCache.load("document");
     assert(
-        staleHtml.includes("[译]Stale source.") &&
+        staleHtml.includes("[译]Alpha paragraph.") &&
             !staleHtml.includes("data-t-id"),
-        "stale marked node must be retranslated",
+        "stale protocol cache must be rebuilt from source",
     );
-    console.log("✅ complete+markers cache is resumed instead of skipped");
+    assert(
+        staleCache.loadChapterStatus().document?.protocolVersion === 3,
+        "rebuilt cache must carry the current protocol version",
+    );
+    console.log("✅ old-protocol complete cache is rebuilt from source");
+
+    console.log("\n=== 重叠标记缓存从原文重建 ===");
+    const overlapCache = createProgressCache(
+        path.join(tmpDir, "cache-overlap"),
+    );
+    overlapCache.save(
+        "doc",
+        '<html><body><ul><li data-t-id="node_0"><p data-t-id="node_1">cached</p></li></ul></body></html>',
+    );
+    overlapCache.saveChapterStatus({
+        doc: {
+            status: "partial",
+            protocolVersion: 3,
+            failedNodeIds: ["node_1"],
+            requiresSourceRebuild: false,
+            updatedAt: "x",
+        },
+    });
+    const overlapMap = new Map([
+        [
+            "doc",
+            {
+                id: "doc",
+                html: "<html><body><ul><li><p>Alpha text.</p></li></ul></body></html>",
+                title: "Doc",
+            },
+        ],
+    ]);
+    const overlapCalls = [];
+    const overlapReport = await runTranslation(
+        overlapCache,
+        overlapMap,
+        createStubQueue(() => false, overlapCalls),
+        "epub",
+    );
+    assert(
+        overlapReport.status === "complete",
+        `overlap rebuild must complete, got ${overlapReport.status}`,
+    );
+    assert(
+        overlapCalls.length === 1 &&
+            overlapCalls[0].some((content) => content.includes("Alpha text.")),
+        "overlapping cache must be rebuilt from source",
+    );
+    assert(
+        !overlapCache.load("doc").includes('data-t-id="node_0"'),
+        "rebuilt cache must not keep overlapping markers",
+    );
+    console.log("✅ overlapping markers trigger source rebuild");
 
     console.log("\n=== Fix 2: verified complete cache is reused without requests ===");
     const reuseCache = createProgressCache(path.join(tmpDir, "cache-reuse"));

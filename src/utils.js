@@ -7,14 +7,31 @@ export const loadHtml = (html) => cheerio.load(html, CHEERIO_OPTIONS);
 
 // =================== AI 响应清洗 ===================
 /**
- * 清洗 AI 返回内容中的 Markdown 代码块包裹。
- * AI 有时会将结果包在 ```xml 或 ``` 中，导致后续 cheerio 解析失败。
+ * 清洗 AI 返回内容：
+ * 1. 只剥离答案最外层（开头）的推理块，避免误删正文/JSON 字符串里的字面标签
+ * 2. 去掉 Markdown 代码块包裹
+ * 支持带属性的推理标签，如 <think role="analysis">。
  */
-export const cleanAIResponse = (raw) => {
-    return raw
-        .replace(/```[\w]*\n?/g, "") // 去掉 ```xml、```html 等开头
-        .replace(/```/g, "") // 去掉尾部 ```
+const REASONING_OPEN = "<(think|thinking|reasoning)\\b[^>]*>";
+
+const stripCodeFences = (value) =>
+    String(value ?? "")
+        .replace(/^```[\w]*\s*/i, "")
+        .replace(/\s*```\s*$/i, "")
         .trim();
+
+export const cleanAIResponse = (raw) => {
+    let text = String(raw ?? "").trim();
+    text = stripCodeFences(text);
+    // 开头已闭合的推理块
+    text = text.replace(
+        new RegExp(`^${REASONING_OPEN}[\\s\\S]*?<\\/\\1>\\s*`, "i"),
+        "",
+    );
+    // 开头未闭合的推理块（响应被截断，只有思考没有答案）
+    text = text.replace(new RegExp(`^${REASONING_OPEN}[\\s\\S]*$`, "i"), "");
+    text = stripCodeFences(text);
+    return text;
 };
 
 // =================== Heading 提取工具 ===================
@@ -118,7 +135,7 @@ export const callAIWithRetry = async (
                 systemPrompt,
                 true,
             );
-            return JSON.parse(raw.replace(/```json|```/g, "").trim());
+            return JSON.parse(cleanAIResponse(raw));
         } catch (e) {
             if (attempt >= maxAttempts) throw e;
             await new Promise((r) => setTimeout(r, 2000));

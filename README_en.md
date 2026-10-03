@@ -115,7 +115,7 @@ WASABI_PDF_PYTHON=C:\path\to\python.exe
 Basic format:
 
 ```bash
-node index.js "input-file" [--chap "<selector>"] [--page "<selector>"] [--from "<lang>"] [--to "<lang>"] [--concurrency <n>] [--debug]
+node index.js "input-file" [--chap "<selector>"] [--page "<selector>"] [--from "<lang>"] [--to "<lang>"] [--model "<model-config>"] [--concurrency <n>] [--debug]
 ```
 
 Common examples:
@@ -146,7 +146,14 @@ Options:
 - `--from`: Set the source language
 - `--to`: Set the target language
 - `--concurrency`: Set concurrency level (must be a positive integer)
+- `--model`: Use a specific model config for body translation (name from `models.json`)
 - `--debug`: Retain cache directories and log files for debugging
+
+Model configuration (optional):
+
+- By default the legacy `.env` keys (`PRIMARY_*` / `FALLBACK_*`) are used
+- Drop a `models.json` in the project root (or point `WASABI_MODELS_FILE` at one) to declare connections, models and per-stage routing: `connections` hold URL/format/token env name, `models` hold the model id and capabilities (`jsonMode`/`reasoning`/`maxOutputTokens`), and `routing.stages` can assign models to `planner/translation/director/glossary/memory/critic/headings`
+- Secrets stay in environment variables (`tokenEnv` only names the variable); changing model/reasoning/budget invalidates old caches via the routing fingerprint
 
 Environment and setup commands:
 

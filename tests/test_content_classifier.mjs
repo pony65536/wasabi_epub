@@ -31,8 +31,14 @@ const createEchoQueue = () => ({
                     $target
                         .html(`[译]${node.content}`)
                         .removeAttr(task.processor.attrName);
+                    const record = task.processor.planState?.get(node.id);
+                    if (record) record.state = "written";
                 }
-                emitter.emit("finish");
+                emitter.emit("finish", {
+                    writtenNodeIds: task.batch.map((node) => node.id),
+                    alreadyWrittenNodeIds: [],
+                    failedNodes: [],
+                });
             });
             return emitter;
         },

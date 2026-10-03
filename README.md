@@ -117,7 +117,7 @@ WASABI_PDF_PYTHON=C:\path\to\python.exe
 基本格式：
 
 ```bash
-node index.js "input-file" [--chap "<selector>"] [--page "<selector>"] [--from "<lang>"] [--to "<lang>"] [--concurrency <n>] [--debug]
+node index.js "input-file" [--chap "<selector>"] [--page "<selector>"] [--from "<lang>"] [--to "<lang>"] [--model "<model-config>"] [--concurrency <n>] [--debug]
 ```
 
 常见示例：
@@ -147,8 +147,15 @@ node index.js "book.epub" --debug
 - `--page`：只翻译指定页码，仅 `PDF`
 - `--from`：设置源语言
 - `--to`：设置目标语言
+- `--model`：只用指定模型配置跑正文翻译（模型配置名来自 `models.json`）
 - `--concurrency`：设置并发数，必须为正整数
 - `--debug`：保留缓存目录和日志文件，便于排错
+
+模型配置（可选）：
+
+- 默认沿用 `.env` 的 `PRIMARY_*` / `FALLBACK_*` 旧配置
+- 在项目根目录放 `models.json`（或用 `WASABI_MODELS_FILE` 指定路径）即可声明连接、模型与阶段路由：`connections` 存 URL/接口格式/密钥环境变量名，`models` 存模型名与能力（`jsonMode`/`reasoning`/`maxOutputTokens`），`routing.stages` 可为 `planner/translation/director/glossary/memory/critic/headings` 分别指定模型
+- 密钥只放在环境变量里（`tokenEnv` 指向变量名）；换模型或改推理/预算会按路由指纹使旧缓存失效
 
 环境与安装命令：
 

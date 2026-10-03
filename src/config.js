@@ -130,6 +130,7 @@ export const createRuntimeConfig = ({
             runtimeConfig[providerName].concurrency = concurrency;
         }
     }
+    runtimeConfig.concurrencyOverride = concurrency || null;
 
     return runtimeConfig;
 };

@@ -12,6 +12,7 @@ import { fileURLToPath } from "url";
 import {
     buildClassificationLog,
     classifyNode,
+    classifyTextNode,
     normalizeText,
 } from "../content/content-classifier.js";
 import { formatBookBibleForPrompt } from "../content/director.js";
@@ -22,7 +23,10 @@ import {
 } from "../content/footnotes.js";
 import { extractChapterMemory } from "../content/memory.js";
 import { computeCoverageAudit } from "./coverage.js";
-import { computeTextDigest } from "../support/taskIdentity.js";
+import {
+    computeTextDigest,
+    TRANSLATION_PIPELINE_VERSION,
+} from "../support/taskIdentity.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -1134,48 +1138,205 @@ const enqueueChapterTranslation = (
         }
 
         const explicitNodes = [];
+        const SELECTABLE_SELECTOR =
+            "p, li, h1, h2, h3, h4, h5, h6, caption, title";
+        const candidateElements = $(SELECTABLE_SELECTOR).toArray();
+        const candidateSet = new Set(candidateElements);
+        const unitByElement = new Map();
+        const preservedByElement = new Map();
+        const decision = new Map();
 
-        $("p, li, h1, h2, h3, h4, h5, h6, caption, title").each((i, el) => {
+        const allCandidateDescendants = (el) => {
+            const result = [];
+            const walk = (node) => {
+                for (const child of node.children || []) {
+                    if (candidateSet.has(child)) result.push(child);
+                    walk(child);
+                }
+            };
+            walk(el);
+            return result;
+        };
+
+        const nearestCandidateDescendants = (el) => {
+            const result = [];
+            const walk = (node) => {
+                for (const child of node.children || []) {
+                    if (candidateSet.has(child)) {
+                        result.push(child);
+                        continue;
+                    }
+                    walk(child);
+                }
+            };
+            walk(el);
+            return result;
+        };
+
+        // 容器剩余可见文本 = 容器文本去掉「后代计划已接管」的子树，
+        // 行内包装（strong/em/a/span）里的文字仍算剩余。
+        const collectUnhandledText = (el, handledSet) => {
+            let text = "";
+            const walk = (node) => {
+                if (node.type === "text") {
+                    text += node.data || "";
+                    return;
+                }
+                if (node !== el && handledSet.has(node)) return;
+                for (const child of node.children || []) walk(child);
+            };
+            walk(el);
+            return normalizeText(text);
+        };
+
+        const cancelDescendants = (el) => {
+            for (const descendant of allCandidateDescendants(el)) {
+                unitByElement.delete(descendant);
+                preservedByElement.delete(descendant);
+                decision.set(descendant, "covered");
+            }
+        };
+
+        const decide = (el) => {
+            if (decision.has(el)) return decision.get(el);
             const $el = $(el);
             const originalHtml = $el.html()?.trim();
-            if (!originalHtml) return;
+            if (!originalHtml) {
+                decision.set(el, "defer");
+                return "defer";
+            }
 
-            const nodeId = `node_${i}`;
+            const descendants = nearestCandidateDescendants(el);
+            for (const descendant of descendants) decide(descendant);
+            const handled = new Set(
+                descendants.filter((descendant) => {
+                    const state = decision.get(descendant);
+                    return state === "translate" || state === "preserve";
+                }),
+            );
+
+            if (descendants.length > 0) {
+                const remaining = collectUnhandledText(el, handled);
+                const remainingClass = remaining
+                    ? classifyTextNode(remaining)
+                    : null;
+                const remainingTranslatable =
+                    remainingClass &&
+                    !shouldBypassClassification(
+                        remainingClass,
+                        translationMode,
+                    );
+                if (remainingTranslatable) {
+                    // 容器接管：撤销后代子计划，避免父子重叠任务
+                    cancelDescendants(el);
+                    decision.set(el, "translate");
+                    unitByElement.set(el, {
+                        element: el,
+                        content: originalHtml,
+                    });
+                    return "translate";
+                }
+                if (remaining && remainingClass) {
+                    // 剩余文本按既有分类明确保留，后代计划继续接管其余内容
+                    preservedByElement.set(el, {
+                        element: el,
+                        text: remaining,
+                        reason: remainingClass.reason,
+                    });
+                }
+                decision.set(el, "defer");
+                return "defer";
+            }
+
             const classification = classifyNode({
                 tagName: el.name,
                 text: $el.text(),
                 html: originalHtml,
             });
-
             if (shouldBypassClassification(classification, translationMode)) {
-                skippedNodeCount++;
-                const logEntry = buildClassificationLog(
-                    nodeId,
-                    classification,
-                    $el.text(),
-                );
-                logClassification(
-                    logger,
-                    enrichClassificationLog(
-                        $,
-                        el,
-                        chapterTitle,
-                        logEntry,
-                        $.html($el),
-                    ),
-                    debugMode,
-                );
-                preservedUnits.push({
-                    id: nodeId,
+                decision.set(el, "preserve");
+                preservedByElement.set(el, {
+                    element: el,
                     text: $el.text(),
                     reason: classification.reason,
                 });
-                markAudit(el, "preserved");
-                return;
+                return "preserve";
             }
+            decision.set(el, "translate");
+            unitByElement.set(el, { element: el, content: originalHtml });
+            return "translate";
+        };
 
-            explicitNodes.push({ id: nodeId, content: originalHtml, node: el });
-        });
+        for (const el of candidateElements) decide(el);
+
+        // 计划校验：目标唯一、无祖先/后代重叠、仍连接在当前 DOM
+        const validatePlan = (units) => {
+            const elements = new Set();
+            for (const unit of units) {
+                if (elements.has(unit.element)) {
+                    return { ok: false, reason: "duplicate_target" };
+                }
+                elements.add(unit.element);
+            }
+            for (const unit of units) {
+                let parent = unit.element.parent;
+                while (parent) {
+                    if (elements.has(parent)) {
+                        return { ok: false, reason: "overlapping_targets" };
+                    }
+                    parent = parent.parent;
+                }
+            }
+            const rootNode = $("body")[0] || $.root()[0];
+            for (const unit of units) {
+                let node = unit.element;
+                let connected = false;
+                while (node) {
+                    if (node === rootNode) {
+                        connected = true;
+                        break;
+                    }
+                    node = node.parent;
+                }
+                if (!connected) {
+                    return { ok: false, reason: "detached_target" };
+                }
+            }
+            return { ok: true };
+        };
+
+        const planUnits = [...unitByElement.values()];
+        const explicitPlanCheck = validatePlan(planUnits);
+        let planInvalid = explicitPlanCheck.ok ? null : explicitPlanCheck.reason;
+
+        if (explicitPlanCheck.ok) {
+            let counter = 0;
+            for (const unit of planUnits) {
+                const nodeId = `node_${counter++}`;
+                unit.id = nodeId;
+                $(unit.element).attr("data-t-id", nodeId);
+                markAudit(unit.element, "selected");
+                explicitNodes.push({
+                    id: nodeId,
+                    content: unit.content,
+                    node: unit.element,
+                });
+            }
+            for (const item of preservedByElement.values()) {
+                const nodeId = `node_${counter++}`;
+                preservedUnits.push({
+                    id: nodeId,
+                    text: item.text,
+                    reason: item.reason,
+                });
+                markAudit(item.element, "preserved");
+            }
+        } else {
+            logger.write(
+                "WARN",
+                `Explicit node plan rejected (${explicitPlanCheck.reason}); falling back or rebuilding.`,
+            );
+        }
 
         const shouldFallback =
             translationMode === "epub" &&
@@ -1192,8 +1353,11 @@ const enqueueChapterTranslation = (
                 logger,
                 debugMode,
             );
+            const structuralCheck = validatePlan(
+                structuralNodes.map((node) => ({ element: node.node })),
+            );
 
-            if (structuralNodes.length > 0) {
+            if (structuralNodes.length > 0 && structuralCheck.ok) {
                 logger.write(
                     "INFO",
                     `Content Filter: ${JSON.stringify({
@@ -1217,6 +1381,12 @@ const enqueueChapterTranslation = (
                 }
                 // 结构回退覆盖全文，显式路径的保留项不再计为漏选
                 preservedUnits.length = 0;
+                planInvalid = null;
+            } else if (structuralNodes.length > 0) {
+                logger.write(
+                    "WARN",
+                    `Structural node plan rejected (${structuralCheck.reason}).`,
+                );
             }
         }
 
@@ -1232,7 +1402,7 @@ const enqueueChapterTranslation = (
             }
         }
 
-        return { collected, preservedUnits };
+        return { collected, preservedUnits, planInvalid };
     };
 
     const collectResult = resumeFailedOnly
@@ -1252,6 +1422,20 @@ const enqueueChapterTranslation = (
     const nodesToTranslate = collectResult.collected;
     const preservedUnits = collectResult.preservedUnits;
 
+    // 章节级计划状态：written 只能由真实写回产生，DOM 标记仅用于定位/续翻
+    const planState = new Map();
+    for (const unit of nodesToTranslate) {
+        planState.set(unit.id, {
+            id: unit.id,
+            element: unit.node,
+            state: "pending",
+            sourceDigest: computeTextDigest(unit.content || ""),
+            outputDigest: null,
+            failureCode: null,
+            retryable: null,
+        });
+    }
+
     if (nodesToTranslate.length === 0) {
         if (resumeFailedOnly) {
             // 续翻请求但没有任何失败标记：缓存不可信，不能当作已完成。
@@ -1266,6 +1450,7 @@ const enqueueChapterTranslation = (
             });
         }
         // 零节点也必须走覆盖率审计：可见文本未被处理时不得 complete
+        const previousPlan = chapterTranslationOptions?.previousPlan || null;
         const coverage = mergePreviousCoverageGaps(
             computeCoverageAudit({
                 selectedUnits: [],
@@ -1274,6 +1459,14 @@ const enqueueChapterTranslation = (
                 textNodeGaps: collectTextNodeGaps(),
             }),
         );
+        if (collectResult.planInvalid) {
+            coverage.gaps.push({
+                id: null,
+                reason: "plan_invalid",
+                sample: collectResult.planInvalid,
+                letterCount: 0,
+            });
+        }
         const zeroStatus = coverage.gaps.length > 0 ? "failed" : "complete";
         const rawHtml = $.xml();
         const cleanHtml = stripAuditMarkers(rawHtml);
@@ -1282,8 +1475,13 @@ const enqueueChapterTranslation = (
             cacheHtml: zeroStatus === "complete" ? cleanHtml : rawHtml,
             status: zeroStatus,
             failedNodeIds: [],
-            totalNodes: 0,
-            translatedNodes: 0,
+            failedNodes: [],
+            nodes: [],
+            writtenNodes: previousPlan?.writtenNodes ?? 0,
+            requiresSourceRebuild: Boolean(collectResult.planInvalid),
+            protocolVersion: TRANSLATION_PIPELINE_VERSION,
+            totalNodes: previousPlan?.totalNodes ?? 0,
+            translatedNodes: previousPlan?.writtenNodes ?? 0,
             coverage,
         });
     }
@@ -1304,6 +1502,8 @@ const enqueueChapterTranslation = (
     const makeProcessor = () => ({
         attrName: "data-t-id",
         targetLanguage: translationConfig.targetLanguage,
+        criticProvider: chapterTranslationOptions?.criticProvider,
+        planState,
         prompt: (batchNodes) => {
             const batchText = batchNodes
                 .map((n) => n.content)
@@ -1374,11 +1574,29 @@ const enqueueChapterTranslation = (
                 : null,
     });
 
-    const dispatchRound = async (nodes, processor) => {
+    // 非重试结构失败（目标缺失/歧义/身份变化）不参与后续重试
+    const structuralFailures = new Map();
+    const recordOutcomes = (outcomes) => {
+        for (const outcome of outcomes) {
+            for (const failure of outcome.result?.failedNodes || []) {
+                if (!failure.retryable) {
+                    structuralFailures.set(failure.id, failure.code);
+                }
+            }
+        }
+    };
+
+    const dispatchRound = async (nodes, processor, options = {}) => {
+        const batchingOptions = getBatchingOptions(translationMode);
         const batches =
             translationMode === "pdf"
                 ? nodes.map((node) => [node])
-                : splitIntoBatches(nodes, getBatchingOptions(translationMode));
+                : splitIntoBatches(nodes, {
+                      ...batchingOptions,
+                      ...(options.nodeLimit
+                          ? { nodeLimit: options.nodeLimit }
+                          : {}),
+                  });
         const dispatchOptions =
             translationMode === "subtitle"
                 ? {
@@ -1411,7 +1629,7 @@ const enqueueChapterTranslation = (
                       },
                   }
                 : {};
-        return Promise.all(
+        const outcomes = await Promise.all(
             dispatchBatches(
                 batches,
                 $,
@@ -1421,6 +1639,8 @@ const enqueueChapterTranslation = (
                 dispatchOptions,
             ),
         );
+        recordOutcomes(outcomes);
+        return outcomes;
     };
 
     const dispatchSplitRetryRounds = async (
@@ -1429,7 +1649,9 @@ const enqueueChapterTranslation = (
         roundLabel,
         maxRounds,
     ) => {
-        let currentNodes = failedNodes;
+        let currentNodes = failedNodes.filter(
+            (node) => !structuralFailures.has(node.id),
+        );
         for (let round = 1; round <= maxRounds; round++) {
             if (currentNodes.length === 0) return;
             const nextNodeLimit = Math.max(
@@ -1439,24 +1661,30 @@ const enqueueChapterTranslation = (
             subtitleStatusLine(
                 `    - ↘️ [${roundLabel}] Retrying ${currentNodes.length} failed node(s) in smaller subtitle batches (Round ${round}/${maxRounds}, nodeLimit=${nextNodeLimit})...`,
             );
-            await Promise.all(
-                dispatchBatches(
-                    splitIntoBatches(currentNodes, {
-                        ...getBatchingOptions(translationMode),
-                        nodeLimit: nextNodeLimit,
-                    }),
-                    $,
-                    processor,
-                    batchQueue,
-                    logger,
+            recordOutcomes(
+                await Promise.all(
+                    dispatchBatches(
+                        splitIntoBatches(currentNodes, {
+                            ...getBatchingOptions(translationMode),
+                            nodeLimit: nextNodeLimit,
+                        }),
+                        $,
+                        processor,
+                        batchQueue,
+                        logger,
+                    ),
                 ),
             );
-            currentNodes = collectFailedNodes($, processor.attrName);
+            currentNodes = collectFailedNodes($, processor.attrName).filter(
+                (node) => !structuralFailures.has(node.id),
+            );
         }
     };
 
     const fallbackToSingleNodes = async (roundLabel, processor) => {
-        const failedNodes = collectFailedNodes($, processor.attrName);
+        const failedNodes = collectFailedNodes($, processor.attrName).filter(
+            (node) => !structuralFailures.has(node.id),
+        );
         if (failedNodes.length === 0) return;
 
         subtitleStatusLine(
@@ -1464,17 +1692,22 @@ const enqueueChapterTranslation = (
         );
 
         const singleNodeBatches = failedNodes.map((node) => [node]);
-        await Promise.all(
-            dispatchBatches(
-                singleNodeBatches,
-                $,
-                processor,
-                batchQueue,
-                logger,
+        recordOutcomes(
+            await Promise.all(
+                dispatchBatches(
+                    singleNodeBatches,
+                    $,
+                    processor,
+                    batchQueue,
+                    logger,
+                ),
             ),
         );
 
-        const unresolvedNodes = collectFailedNodes($, processor.attrName);
+        const unresolvedNodes = collectFailedNodes(
+            $,
+            processor.attrName,
+        ).filter((node) => !structuralFailures.has(node.id));
         if (unresolvedNodes.length === 0) return;
 
         const unresolvedIds = unresolvedNodes.map((node) => node.id);
@@ -1496,12 +1729,20 @@ const enqueueChapterTranslation = (
 
         const MAX_RETRY_ROUNDS = translationMode === "subtitle" ? 2 : 3;
         for (let round = 1; round <= MAX_RETRY_ROUNDS; round++) {
-            const failedNodes = collectFailedNodes($, processor.attrName);
+            const failedNodes = collectFailedNodes(
+                $,
+                processor.attrName,
+            ).filter((node) => !structuralFailures.has(node.id));
             if (failedNodes.length === 0) break;
-            subtitleStatusLine(
-                `    - ⚠️ [${roundLabel}] Retrying ${failedNodes.length} failed nodes (Round ${round}/${MAX_RETRY_ROUNDS})...`,
+            // 截断/格式类失败：重试时逐步缩小批次，降低再次截断概率
+            const nodeLimit = Math.max(
+                2,
+                Math.ceil(failedNodes.length / Math.pow(2, round)),
             );
-            await dispatchRound(failedNodes, processor);
+            subtitleStatusLine(
+                `    - ⚠️ [${roundLabel}] Retrying ${failedNodes.length} failed nodes (Round ${round}/${MAX_RETRY_ROUNDS}, nodeLimit=${nodeLimit})...`,
+            );
+            await dispatchRound(failedNodes, processor, { nodeLimit });
         }
 
         if (translationMode === "subtitle") {
@@ -1553,25 +1794,56 @@ const enqueueChapterTranslation = (
             return $.xml();
         };
 
-        const remaining = collectFailedNodes($, "data-t-id");
-        const totalNodes = nodesToTranslate.length;
-        const translatedNodes = totalNodes - remaining.length;
+        const previousPlan = chapterTranslationOptions?.previousPlan || null;
+        const pendingFailed = collectFailedNodes($, "data-t-id").filter(
+            (node) => !structuralFailures.has(node.id),
+        );
+        const structuralFailed = [...structuralFailures.entries()].map(
+            ([id, code]) => ({ id, code, retryable: false }),
+        );
+        const newlyWritten = [...planState.values()].filter(
+            (record) => record.state === "written",
+        ).length;
+        const totalNodes =
+            previousPlan?.totalNodes ?? planState.size;
+        const translatedNodes =
+            (previousPlan?.writtenNodes ?? 0) + newlyWritten;
+        const failedNodeIds = [
+            ...pendingFailed.map((node) => node.id),
+            ...structuralFailed.map((item) => item.id),
+        ];
+        const requiresSourceRebuild =
+            structuralFailures.size > 0 || Boolean(collectResult.planInvalid);
         const coverage = mergePreviousCoverageGaps(
             computeCoverageAudit({
                 selectedUnits: nodesToTranslate,
                 preservedUnits,
-                failedNodeIds: remaining.map((node) => node.id),
+                failedNodeIds,
                 textNodeGaps: collectTextNodeGaps(),
             }),
         );
+        if (collectResult.planInvalid) {
+            coverage.gaps.push({
+                id: null,
+                reason: "plan_invalid",
+                sample: collectResult.planInvalid,
+                letterCount: 0,
+            });
+        }
         const hasCoverageGaps = coverage.gaps.length > 0;
+        const allPlannedWritten = [...planState.values()].every(
+            (record) => record.state === "written",
+        );
         const status =
-            remaining.length === 0 && !hasCoverageGaps
+            pendingFailed.length === 0 &&
+            structuralFailed.length === 0 &&
+            !hasCoverageGaps &&
+            !collectResult.planInvalid &&
+            allPlannedWritten
                 ? "complete"
                 : translatedNodes === 0
                   ? "failed"
                   : "partial";
-        const failedNodeIds = remaining.map((node) => node.id);
         if (status === "complete") {
             $("[data-t-id]").removeAttr("data-t-id");
         }
@@ -1585,6 +1857,24 @@ const enqueueChapterTranslation = (
             cacheHtml: status === "complete" ? cleanHtml : finalizedHtml,
             status,
             failedNodeIds,
+            failedNodes: [
+                ...pendingFailed.map((node) => ({
+                    id: node.id,
+                    code: "UNRESOLVED",
+                    retryable: true,
+                })),
+                ...structuralFailed,
+            ],
+            nodes: [...planState.values()].map((record) => ({
+                id: record.id,
+                state: record.state,
+                sourceDigest: record.sourceDigest,
+                outputDigest: record.outputDigest,
+                failureCode: structuralFailures.get(record.id) || null,
+            })),
+            writtenNodes: translatedNodes,
+            requiresSourceRebuild,
+            protocolVersion: TRANSLATION_PIPELINE_VERSION,
             totalNodes,
             translatedNodes,
             coverage,
@@ -1607,6 +1897,18 @@ const stripTranslationMarkers = (html) => {
 
 const hasTranslationMarkers = (html) =>
     typeof html === "string" && /data-t-id\s*=/.test(html);
+
+const hasOverlappingTranslationMarkers = (html) => {
+    if (!hasTranslationMarkers(html)) return false;
+    const $ = loadHtml(html);
+    let overlapping = false;
+    $("[data-t-id]").each((_, el) => {
+        if ($(el).parents("[data-t-id]").length > 0) {
+            overlapping = true;
+        }
+    });
+    return overlapping;
+};
 
 // 兼容旧调用（headings.js 等地方可能直接调用）
 export const translateHtmlContent = async (
@@ -1679,10 +1981,22 @@ export const performTranslation = async (
             const cachedDigest = chapterStatus[ch.id]?.htmlDigest;
             const digestOk =
                 !cachedDigest || cachedDigest === computeTextDigest(cached);
+            const protocolStale =
+                Boolean(cachedStatus) &&
+                chapterStatus[ch.id]?.protocolVersion !==
+                    TRANSLATION_PIPELINE_VERSION;
+            const requiresRebuild = Boolean(
+                chapterStatus[ch.id]?.requiresSourceRebuild,
+            );
+            const overlappingMarkers =
+                cachedStatus !== "complete" &&
+                hasOverlappingTranslationMarkers(cached);
             if (
                 cachedStatus === "complete" &&
                 !hasTranslationMarkers(cached) &&
-                digestOk
+                digestOk &&
+                !protocolStale &&
+                !requiresRebuild
             ) {
                 chapterMap.get(ch.id).html = cached;
                 skipped++;
@@ -1707,6 +2021,18 @@ export const performTranslation = async (
                 console.log(
                     `⏭️  [${i + 1}/${total}] Skipped (verified cached): "${ch.title}"`,
                 );
+                continue;
+            }
+            if (protocolStale || requiresRebuild || overlappingMarkers) {
+                console.log(
+                    `♻️ [${i + 1}/${total}] Cache needs rebuild (${protocolStale ? "protocol" : requiresRebuild ? "structural failure" : "overlapping markers"}); retranslating source: "${ch.title}"`,
+                );
+                pending.push({
+                    ch,
+                    index: i,
+                    resumeFailedOnly: false,
+                    sourceHtml: ch.html,
+                });
                 continue;
             }
             if (!digestOk) {
@@ -1785,6 +2111,15 @@ export const performTranslation = async (
                     chapterId: ch.id,
                     previousCoverageGaps:
                         chapterStatus[ch.id]?.coverage?.gaps || [],
+                    previousPlan: chapterStatus[ch.id]
+                        ? {
+                              totalNodes:
+                                  chapterStatus[ch.id].totalNodes ?? 0,
+                              writtenNodes:
+                                  chapterStatus[ch.id].writtenNodes ?? 0,
+                              nodes: chapterStatus[ch.id].nodes || [],
+                          }
+                        : null,
                     resumeFailedOnly,
                 },
             );
@@ -1806,6 +2141,15 @@ export const performTranslation = async (
                         failedNodeIds,
                         totalNodes: result?.totalNodes ?? 0,
                         translatedNodes: result?.translatedNodes ?? 0,
+                        writtenNodes: result?.writtenNodes ?? 0,
+                        nodes: result?.nodes || [],
+                        failedNodes: result?.failedNodes || [],
+                        requiresSourceRebuild: Boolean(
+                            result?.requiresSourceRebuild,
+                        ),
+                        protocolVersion:
+                            result?.protocolVersion ??
+                            TRANSLATION_PIPELINE_VERSION,
                         coverage: result?.coverage ?? null,
                         htmlDigest: computeTextDigest(cacheHtml),
                         updatedAt: new Date().toISOString(),
@@ -1853,7 +2197,8 @@ export const performTranslation = async (
                                     extractChapterMemory(
                                         result.html,
                                         bookTranslationOptions.livingMemoryStore,
-                                        aiProvider,
+                                        bookTranslationOptions?.memoryProvider ||
+                                            aiProvider,
                                         logger,
                                         translationConfig,
                                         ch.title,

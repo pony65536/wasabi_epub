@@ -85,7 +85,7 @@ const run = async () => {
     );
     const lock2 = cache.acquireTaskLock();
     assert(!lock2.acquired, "fresh lock from another pid must block");
-    // 已退出进程的锁（pid 已不存在）才可回收
+    // 已退出进程的锁：无论锁龄多短都应立即回收
     const deadChild = spawn(process.execPath, ["-e", "process.exit(0)"]);
     const deadPid = deadChild.pid;
     await new Promise((resolve) => deadChild.on("close", resolve));
@@ -94,12 +94,15 @@ const run = async () => {
         JSON.stringify({
             pid: deadPid,
             token: "stale-token",
-            startedAt: Date.now() - 7 * 60 * 60 * 1000,
+            startedAt: Date.now(),
         }),
         "utf8",
     );
     const lock3 = cache.acquireTaskLock();
-    assert(lock3.acquired, "stale lock must be reclaimed");
+    assert(
+        lock3.acquired,
+        "lock from a dead process must be reclaimed regardless of age",
+    );
     cache.releaseTaskLock();
     assert(
         !fs.existsSync(path.join(cacheDir, "task.lock")),

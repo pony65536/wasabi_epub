@@ -3,7 +3,7 @@ import fs from "fs";
 import path from "path";
 
 // 翻译规则/流程版本：提示词、批处理或后处理规则变化时递增
-export const TRANSLATION_PIPELINE_VERSION = 2;
+export const TRANSLATION_PIPELINE_VERSION = 3;
 
 const FULL_HASH_MAX_BYTES = 64 * 1024 * 1024;
 const SAMPLE_BYTES = 1024 * 1024;

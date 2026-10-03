@@ -8,6 +8,7 @@ import {
 import { shouldTriggerCritic, reviewAndCorrectNode } from "../content/critic.js";
 import { validateProtectedStructure } from "./structureGuard.js";
 import { classifyProviderError } from "./aiProvider.js";
+import { computeTextDigest } from "../support/taskIdentity.js";
 
 const previewText = (text, maxLength = 300) => {
     const normalized = String(text ?? "").replace(/\s+/g, " ").trim();
@@ -241,7 +242,7 @@ export const createBatchQueue = (aiProvider, logger) => {
                         finalContent = await reviewAndCorrectNode(
                             node.content,
                             processedContent,
-                            aiProvider,
+                            processor.criticProvider || aiProvider,
                             logger,
                             processor.targetLanguage,
                         );
@@ -274,28 +275,69 @@ export const createBatchQueue = (aiProvider, logger) => {
                         throw missingError;
                     }
 
+                    const writtenNodeIds = [];
+                    const alreadyWrittenNodeIds = [];
+                    const failedNodes = [];
                     for (const update of updates) {
+                        const record = processor.planState?.get(update.nodeId);
+                        if (record?.state === "written") {
+                            alreadyWrittenNodeIds.push(update.nodeId);
+                            $parent(
+                                `[${processor.attrName}="${update.nodeId}"]`,
+                            ).removeAttr(processor.attrName);
+                            continue;
+                        }
                         const $target = $parent(
                             `[${processor.attrName}="${update.nodeId}"]`,
                         );
                         if ($target.length === 0) {
-                            const targetMissingError = new Error(
-                                `Node ${update.nodeId} could not be written back to the document.`,
-                            );
-                            targetMissingError.responsePreview =
-                                previewText(rawResponse);
-                            throw targetMissingError;
+                            failedNodes.push({
+                                id: update.nodeId,
+                                code: "TARGET_MISSING",
+                                retryable: false,
+                            });
+                            continue;
+                        }
+                        if ($target.length > 1) {
+                            failedNodes.push({
+                                id: update.nodeId,
+                                code: "TARGET_AMBIGUOUS",
+                                retryable: false,
+                            });
+                            continue;
+                        }
+                        if (
+                            record?.element &&
+                            $target.get(0) !== record.element
+                        ) {
+                            failedNodes.push({
+                                id: update.nodeId,
+                                code: "TARGET_CHANGED",
+                                retryable: false,
+                            });
+                            continue;
                         }
                         $target
                             .html(update.processedContent)
                             .removeAttr(processor.attrName);
+                        if (record) {
+                            record.state = "written";
+                            record.outputDigest = computeTextDigest(
+                                update.processedContent,
+                            );
+                        }
+                        writtenNodeIds.push(update.nodeId);
                     }
 
                     success = true;
                     try {
                         onTaskSuccess?.(batch);
                     } catch {}
-                    cb(null);
+                    cb(null, {
+                        writtenNodeIds,
+                        alreadyWrittenNodeIds,
+                        failedNodes,
+                    });
                 } catch (e) {
                     const classification = classifyProviderError(e);
                     logger.write(
@@ -395,7 +437,9 @@ export const dispatchBatches = (
                         onTaskSuccess: options.onTaskSuccess,
                         onTaskFailure: options.onTaskFailure,
                     })
-                    .on("finish", () => resolve({ ok: true, batch }))
+                    .on("finish", (result) =>
+                        resolve({ ok: true, batch, result: result || null }),
+                    )
                     .on("failed", (err) => {
                         logger.write(
                             "ERROR",

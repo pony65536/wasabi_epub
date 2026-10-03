@@ -5,6 +5,7 @@ import {
 } from "../src/content/inlineSlots.js";
 import { validateProtectedStructure } from "../src/translation/structureGuard.js";
 import { createBatchQueue } from "../src/translation/batchQueue.js";
+import { translateHtmlContent } from "../src/translation/translator.js";
 import { splitLargeChapter } from "../src/epub/epubDoctor.js";
 import { saveEpub } from "../src/epub/epubSaver.js";
 import {
@@ -14,11 +15,15 @@ import { synchronizeTocHtml } from "../src/epub/tocSync.js";
 import { readPdfFillResult } from "../src/pdf/pdfBridge.js";
 import { applyTranslatedHtmlToPdfJson } from "../src/pdf/pdfHtml.js";
 import {
+    parseSseCompletion,
+    readCompletionContent,
+} from "../src/translation/aiProvider.js";
+import {
     extractAndFormatNotes,
     appendFootnotesSection,
     findMaxFootnoteIndex,
 } from "../src/content/footnotes.js";
-import { loadHtml } from "../src/utils.js";
+import { loadHtml, cleanAIResponse, callAIWithRetry } from "../src/utils.js";
 import AdmZip from "adm-zip";
 import fs from "fs";
 import os from "os";
@@ -40,7 +45,7 @@ const pushTask = (batchQueue, task) =>
     new Promise((resolve, reject) => {
         batchQueue.queue
             .push(task)
-            .on("finish", () => resolve())
+            .on("finish", (result) => resolve(result || null))
             .on("failed", (error) => reject(error));
     });
 
@@ -235,6 +240,365 @@ const run = async () => {
         `changed src must fail, got: ${attrFailed}`,
     );
     console.log("✅ protected attribute value change rejected");
+
+    console.log("\n=== thinking/reasoning 输出剥离 ===");
+    const THINK_OPEN = "<" + "thinking>";
+    const THINK_CLOSE = "</" + "thinking" + ">";
+    const withClosedThinking = cleanAIResponse(
+        `${THINK_OPEN}secret reasoning${THINK_CLOSE}<node id="node_0">x</node>`,
+    );
+    assert(
+        !withClosedThinking.includes("secret") &&
+            withClosedThinking.includes('<node id="node_0">'),
+        `closed thinking must be stripped: ${withClosedThinking}`,
+    );
+    const withTruncatedThinking = cleanAIResponse(
+        `${THINK_OPEN}only reasoning without answer`,
+    );
+    assert(
+        withTruncatedThinking === "" &&
+            !withTruncatedThinking.includes("thinking"),
+        "unclosed leading thinking must be stripped",
+    );
+    const withAttributedThinking = cleanAIResponse(
+        `<think role="analysis">secret` +
+            "</" +
+            "think>" +
+            `<node id="node_0">x</node>`,
+    );
+    assert(
+        !withAttributedThinking.includes("secret") &&
+            withAttributedThinking.includes('<node id="node_0">'),
+        "thinking tag with attributes must be stripped",
+    );
+    const fencedThinking = cleanAIResponse(
+        "```xml\n" +
+            `${THINK_OPEN}secret${THINK_CLOSE}\n<node id="node_0">x</node>\n` +
+            "```",
+    );
+    assert(
+        fencedThinking.startsWith('<node id="node_0">') &&
+            !fencedThinking.includes("secret"),
+        "fenced thinking must be stripped",
+    );
+    // 只剥离答案最外层：正文/JSON 字符串里的字面推理标签必须保留
+    const literalThinking = '{"improved":"keep <thinking> literal tag"}';
+    assert(
+        cleanAIResponse(literalThinking) === literalThinking,
+        "literal thinking tags inside JSON must be preserved",
+    );
+    const inlineThinking = cleanAIResponse(
+        `prefix ${THINK_OPEN}unfinished reasoning`,
+    );
+    assert(
+        inlineThinking.includes("prefix") &&
+            inlineThinking.includes(THINK_OPEN),
+        "non-leading thinking content must be preserved",
+    );
+    const jsonFromThinking = await callAIWithRetry(
+        {
+            callAI: async () =>
+                `${THINK_OPEN}let me think ${THINK_CLOSE}{"improved":"ok","hasSevereIssue":false}`,
+        },
+        "user",
+        "system",
+    );
+    assert(
+        jsonFromThinking.improved === "ok",
+        "JSON parsing must succeed after thinking is stripped",
+    );
+
+    console.log("\n=== SSE / 截断响应判定 ===");
+    assert(
+        parseSseCompletion(
+            'data: {"choices":[{"delta":{"reasoning":"only thoughts"}}]}\ndata: [DONE]',
+        ) === "",
+        "reasoning-only SSE must yield no content",
+    );
+    assert(
+        parseSseCompletion(
+            'data: {"choices":[{"delta":{"content":"hello"}}]}\ndata: [DONE]',
+        ) === "hello",
+        "SSE content must be extracted",
+    );
+    let truncatedCode = null;
+    try {
+        readCompletionContent({
+            choices: [{ finish_reason: "length", message: { content: "half" } }],
+        });
+    } catch (error) {
+        truncatedCode = error.code;
+    }
+    assert(
+        truncatedCode === "OUTPUT_TRUNCATED",
+        "finish_reason=length must be rejected as truncated",
+    );
+    assert(
+        readCompletionContent({
+            choices: [{ finish_reason: "stop", message: { content: "ok" } }],
+        }) === "ok",
+        "complete response must be returned",
+    );
+    let reasoningOnlyCode = null;
+    try {
+        readCompletionContent({
+            choices: [
+                {
+                    finish_reason: "stop",
+                    message: { content: "", reasoning_content: "thoughts" },
+                },
+            ],
+        });
+    } catch (error) {
+        reasoningOnlyCode = error.code;
+    }
+    assert(
+        reasoningOnlyCode === "EMPTY_CONTENT",
+        "reasoning-only completion must be rejected",
+    );
+    const thinkingProvider = {
+        concurrency: 1,
+        callAI: async (input) => `${THINK_OPEN}reasoning text${THINK_CLOSE}${input}`,
+    };
+    const thinkingQueue = createBatchQueue(thinkingProvider, logger);
+    const $thinkingDoc = loadHtml(
+        `<html><body><p data-t-id="node_0">Hello</p></body></html>`,
+    );
+    await pushTask(thinkingQueue, {
+        batch: [{ id: "node_0", content: "Hello" }],
+        $parent: $thinkingDoc,
+        processor: {
+            attrName: "data-t-id",
+            targetLanguage: "Chinese (Simplified)",
+            prompt: "translate",
+        },
+    });
+    assert(
+        $thinkingDoc("p").html().includes("Hello"),
+        "batch must succeed when response has a thinking prefix",
+    );
+    console.log("✅ thinking stripped for XML and JSON responses");
+
+    console.log("\n=== 父子节点去重：不重叠、不互相替换 ===");
+    const createRecordingQueue = (calls) => ({
+        queue: {
+            push(task) {
+                calls.push(
+                    task.batch.map((node) => ({
+                        id: node.id,
+                        content: node.content,
+                    })),
+                );
+                const emitter = {
+                    handlers: {},
+                    on(event, handler) {
+                        this.handlers[event] = handler;
+                        return this;
+                    },
+                    emit(event, payload) {
+                        if (this.handlers[event]) this.handlers[event](payload);
+                    },
+                };
+                setImmediate(() => {
+                    for (const node of task.batch) {
+                        const $target = task.$parent(
+                            `[${task.processor.attrName}="${node.id}"]`,
+                        );
+                        if ($target.length > 0) {
+                            $target
+                                .html(`[译]${node.content}`)
+                                .removeAttr(task.processor.attrName);
+                            const record = task.processor.planState?.get(
+                                node.id,
+                            );
+                            if (record) record.state = "written";
+                        }
+                    }
+                    emitter.emit("finish", {
+                        writtenNodeIds: task.batch.map((node) => node.id),
+                        alreadyWrittenNodeIds: [],
+                        failedNodes: [],
+                    });
+                });
+                return emitter;
+            },
+        },
+        drainQueue: async () => {},
+    });
+    const translationConfig = {
+        sourceLanguage: "English",
+        targetLanguage: "Chinese (Simplified)",
+    };
+    const leafCalls = [];
+    const leafResult = await translateHtmlContent(
+        "<html><body><ul><li><p>Alpha paragraph text.</p></li></ul></body></html>",
+        "Nested",
+        {},
+        translationConfig,
+        null,
+        createRecordingQueue(leafCalls),
+        logger,
+        new Set(),
+        new Set(),
+        "epub",
+        false,
+        {},
+    );
+    assert(
+        leafResult.status === "complete",
+        `nested leaf selection must complete, got ${leafResult.status}`,
+    );
+    assert(
+        leafCalls.length === 1 &&
+            leafCalls[0].length === 1 &&
+            leafCalls[0][0].content.includes("Alpha paragraph text."),
+        `only the leaf <p> must be selected, got ${JSON.stringify(leafCalls)}`,
+    );
+
+    const outerCalls = [];
+    const outerResult = await translateHtmlContent(
+        "<html><body><ul><li>Outer intro text.<ul><li>Inner item text.</li></ul></li></ul></body></html>",
+        "NestedList",
+        {},
+        translationConfig,
+        null,
+        createRecordingQueue(outerCalls),
+        logger,
+        new Set(),
+        new Set(),
+        "epub",
+        false,
+        {},
+    );
+    assert(
+        outerResult.status === "complete" &&
+            outerCalls.length === 1 &&
+            outerCalls[0].length === 1 &&
+            outerCalls[0][0].content.includes("Outer intro text.") &&
+            outerCalls[0][0].content.includes("Inner item text."),
+        `outer list item with direct text must be selected once, got ${JSON.stringify(outerCalls)}`,
+    );
+    console.log("✅ parent/child selection deduplicated");
+
+    console.log("\n=== strong 引言 + p 正文合并为单一单元 ===");
+    const strongCalls = [];
+    const strongResult = await translateHtmlContent(
+        "<html><body><ul><li><strong>Intro line.</strong><p>Body paragraph text.</p></li></ul></body></html>",
+        "StrongIntro",
+        {},
+        translationConfig,
+        null,
+        createRecordingQueue(strongCalls),
+        logger,
+        new Set(),
+        new Set(),
+        "epub",
+        false,
+        {},
+    );
+    assert(
+        strongResult.status === "complete" &&
+            strongCalls.length === 1 &&
+            strongCalls[0].length === 1 &&
+            strongCalls[0][0].content.includes("Intro line.") &&
+            strongCalls[0][0].content.includes("Body paragraph text."),
+        `intro + body must share one unit, got ${JSON.stringify(strongCalls)}`,
+    );
+    console.log("✅ container with inline intro takes over descendants");
+
+    console.log("\n=== 正文块结构保护（内层列表不得消失） ===");
+    assert(
+        !validateProtectedStructure(
+            "<ul><li><p>A</p></li></ul>",
+            "<ul><li>A</li></ul>",
+        ).ok,
+        "flattened inner list must be rejected",
+    );
+    assert(
+        validateProtectedStructure(
+            "<ul><li><p>A</p></li></ul>",
+            "<ul><li><p>译文</p></li></ul>",
+        ).ok,
+        "same body structure with translated text must pass",
+    );
+    console.log("✅ body block structure validated");
+
+    console.log("\n=== TARGET_MISSING 不计 written、不重试 ===");
+    const missingQueue = createBatchQueue(
+        { concurrency: 1, callAI: async (input) => input },
+        logger,
+    );
+    const $missingDoc = loadHtml(
+        `<html><body><p>source text</p></body></html>`,
+    );
+    const missingPlan = new Map([
+        [
+            "node_0",
+            {
+                id: "node_0",
+                element: $missingDoc("p").get(0),
+                state: "pending",
+            },
+        ],
+    ]);
+    const missingResult = await pushTask(missingQueue, {
+        batch: [{ id: "node_0", content: "source text" }],
+        $parent: $missingDoc,
+        processor: {
+            attrName: "data-t-id",
+            planState: missingPlan,
+            targetLanguage: "Chinese (Simplified)",
+            prompt: "translate",
+        },
+    });
+    assert(
+        missingResult?.failedNodes?.some(
+            (failure) =>
+                failure.id === "node_0" &&
+                failure.code === "TARGET_MISSING" &&
+                failure.retryable === false,
+        ),
+        `missing target must be a structural failure, got ${JSON.stringify(missingResult)}`,
+    );
+    assert(
+        missingPlan.get("node_0").state === "pending",
+        "TARGET_MISSING must not be recorded as written",
+    );
+    console.log("✅ missing target recorded as structural failure");
+
+    console.log("\n=== 写回目标被祖先覆盖时跳过而非重试 ===");
+    const supersededQueue = createBatchQueue(
+        { concurrency: 1, callAI: async (input) => input },
+        logger,
+    );
+    const $supersededDoc = loadHtml(
+        `<html><body><div data-t-id="node_0"><span data-t-id="node_1">inner</span></div></body></html>`,
+    );
+    const supersededResult = await pushTask(supersededQueue, {
+        batch: [
+            { id: "node_0", content: "outer content" },
+            { id: "node_1", content: "inner content" },
+        ],
+        $parent: $supersededDoc,
+        processor: {
+            attrName: "data-t-id",
+            targetLanguage: "Chinese (Simplified)",
+            prompt: "translate",
+        },
+    });
+    assert(
+        $supersededDoc("div").html().includes("outer content"),
+        "ancestor write-back must win",
+    );
+    assert(
+        supersededResult?.failedNodes?.some(
+            (failure) =>
+                failure.id === "node_1" &&
+                failure.code === "TARGET_MISSING",
+        ),
+        "superseded child target must be recorded as structural failure",
+    );
+    console.log("✅ superseded target recorded, not silently skipped");
 
     // 兼容包装仍返回字符串
     assert(

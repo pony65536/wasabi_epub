@@ -2,17 +2,9 @@ import AdmZip from "adm-zip";
 import * as cheerio from "cheerio";
 import fs from "fs";
 import path from "path";
-import {
-    CURRENT_PROVIDER,
-    FALLBACK_PROVIDER,
-    FALLBACK_ON_CONTENT_POLICY,
-    JAPANESE_GLOSSARY_MODEL,
-    JAPANESE_GLOSSARY_PROVIDER,
-    RUSSIAN_GLOSSARY_MODEL,
-    RUSSIAN_GLOSSARY_PROVIDER,
-} from "./config.js";
 import { createLogger } from "./support/logger.js";
-import { createAIProvider } from "./translation/aiProvider.js";
+import { createModelGateway } from "./models/gateway.js";
+import { resolveModelRouting } from "./models/routing.js";
 import {
     buildJobResult,
     createJobCache,
@@ -23,6 +15,7 @@ import {
     computeFileDigest,
     computePromptDigest,
     computeTextDigest,
+    TRANSLATION_PIPELINE_VERSION,
 } from "./support/taskIdentity.js";
 import { selectChaptersBySpec } from "./support/chapterSelection.js";
 import { moveFileIfNeeded } from "./support/archive.js";
@@ -97,6 +90,9 @@ const countCachedChapters = (cache, chapters) => {
         if (!cached) return count;
         const verifiedComplete =
             statusMap[chapter.id]?.status === "complete" &&
+            statusMap[chapter.id]?.protocolVersion ===
+                TRANSLATION_PIPELINE_VERSION &&
+            !statusMap[chapter.id]?.requiresSourceRebuild &&
             !/data-t-id\s*=/.test(cached);
         return count + (verifiedComplete ? 1 : 0);
     }, 0);
@@ -446,49 +442,38 @@ const collectDefinedClasses = (zipEntries) => {
     return definedClasses;
 };
 
-const hasUsableProviderConfig = (providerName, config) => {
-    const providerConfig = config?.[providerName];
-    if (!providerConfig) return false;
-    return Boolean(providerConfig.apiKey);
+const createJobGateway = ({
+    projectRoot,
+    runtimeConfig,
+    logger,
+    modelName = null,
+}) => {
+    const routing = resolveModelRouting({
+        projectRoot,
+        env: process.env,
+        cli: { model: modelName || undefined },
+        sourceLanguage: runtimeConfig.sourceLanguage,
+    });
+    const gateway = createModelGateway({
+        routing,
+        logger,
+        globalConcurrency: runtimeConfig.concurrencyOverride || null,
+        connectionConcurrency: runtimeConfig.concurrencyOverride || null,
+    });
+    for (const warning of routing.warnings || []) {
+        logger.write("WARN", warning);
+    }
+    return gateway;
 };
 
-const createGlossaryProvider = (logger, runtimeConfig) => {
-    const primaryProvider = createAIProvider(
-        CURRENT_PROVIDER,
-        runtimeConfig,
-        logger,
-        FALLBACK_PROVIDER,
-        FALLBACK_ON_CONTENT_POLICY,
-    );
-
-    let glossaryProviderName = null;
-    let glossaryModelName = null;
-
-    if (runtimeConfig.sourceLanguage === "Russian") {
-        glossaryProviderName = RUSSIAN_GLOSSARY_PROVIDER;
-        glossaryModelName = RUSSIAN_GLOSSARY_MODEL;
-    } else if (runtimeConfig.sourceLanguage === "Japanese") {
-        glossaryProviderName = JAPANESE_GLOSSARY_PROVIDER;
-        glossaryModelName = JAPANESE_GLOSSARY_MODEL;
-    }
-
-    if (!glossaryProviderName || !glossaryModelName) {
-        return primaryProvider;
-    }
-
-    const glossaryConfig = {
-        ...runtimeConfig,
-        [glossaryProviderName]: {
-            ...runtimeConfig[glossaryProviderName],
-            modelName: glossaryModelName,
-        },
-    };
-
-    if (!hasUsableProviderConfig(glossaryProviderName, glossaryConfig)) {
-        return primaryProvider;
-    }
-
-    return createAIProvider(glossaryProviderName, glossaryConfig, logger);
+const formatRoutingSummary = (gateway) => {
+    const describe = gateway.describe?.() || {};
+    return Object.entries(describe)
+        .map(
+            ([stage, info]) =>
+                `${stage}=${info.model}@${info.connection}${info.fallback ? `->${info.fallback.model}` : ""}`,
+        )
+        .join("  ");
 };
 
 const createChapterMap = (zipEntries) => {
@@ -633,6 +618,7 @@ export const runTranslationJob = async ({
     chapterSelector = null,
     debugMode = false,
     runtimeConfig,
+    modelName = null,
 }) => {
     const logDir = path.resolve(projectRoot, "log");
     const inputDir = path.resolve(projectRoot, "input");
@@ -642,14 +628,14 @@ export const runTranslationJob = async ({
     ensureDir(outputDir);
 
     const logger = createLogger(logDir);
-    const aiProvider = createAIProvider(
-        CURRENT_PROVIDER,
+    const gateway = createJobGateway({
+        projectRoot,
         runtimeConfig,
         logger,
-        FALLBACK_PROVIDER,
-        FALLBACK_ON_CONTENT_POLICY,
-    );
-    const glossaryProvider = createGlossaryProvider(logger, runtimeConfig);
+        modelName,
+    });
+    const aiProvider = gateway.forStage("translation");
+    const glossaryProvider = gateway.forStage("glossary");
     const batchQueue = createBatchQueue(aiProvider, logger);
 
     const fileInfo = path.parse(inputPath);
@@ -674,12 +660,13 @@ export const runTranslationJob = async ({
     console.log(`🐞 Debug: ${debugMode ? "on" : "off"}`);
     console.log(`🗣️ Source: ${runtimeConfig.sourceLanguage}`);
     console.log(`🌐 Target: ${runtimeConfig.targetLanguage}`);
-    if (runtimeConfig[CURRENT_PROVIDER]?.concurrency) {
+    if (runtimeConfig.concurrencyOverride) {
         console.log(
-            `⚙️ Concurrency: ${runtimeConfig[CURRENT_PROVIDER].concurrency}`,
+            `⚙️ Concurrency: ${runtimeConfig.concurrencyOverride}`,
         );
     }
     console.log(`🤖 Provider: ${aiProvider.providerName} (${aiProvider.modelName})`);
+    console.log(`🧭 Routing: ${formatRoutingSummary(gateway)}`);
     if (aiProvider.fallbackProviderName) {
         console.log(`🛟 Fallback: ${aiProvider.fallbackProviderName}`);
     }
@@ -714,6 +701,7 @@ export const runTranslationJob = async ({
                     "epub_translation_prompt.txt",
                 ),
                 chapterSelector: chapterSelector || null,
+                modelRoutingFingerprint: gateway.routing.fingerprint,
             },
         });
         ensureCacheIdentity(
@@ -751,7 +739,7 @@ export const runTranslationJob = async ({
         } else {
             plan = await planTranslationOrder(
                 [...chapterMap.values()],
-                aiProvider,
+                gateway.forStage("planner"),
                 logger,
             );
             cache.savePlan({ ...plan, repairFingerprint });
@@ -773,7 +761,7 @@ export const runTranslationJob = async ({
                 directorChapters.length > 0
                     ? directorChapters
                     : [...chapterMap.values()],
-                aiProvider,
+                gateway.forStage("director"),
                 logger,
                 runtimeConfig,
             );
@@ -837,7 +825,7 @@ export const runTranslationJob = async ({
         } else {
             headingFormatRules = await analyzeHeadingFormats(
                 selectedChapterMap,
-                aiProvider,
+                gateway.forStage("headings"),
                 logger,
                 runtimeConfig,
             );
@@ -883,6 +871,8 @@ export const runTranslationJob = async ({
             bookBible,
             livingMemoryStore,
             contextRetriever,
+            criticProvider: gateway.forStage("critic"),
+            memoryProvider: gateway.forStage("memory"),
         };
 
         // 阶段化调度：正文优先（积累记忆与术语），前置材料最后
@@ -963,7 +953,7 @@ export const runTranslationJob = async ({
         await standardizeHeadingsByRules(
             selectedChapterMap,
             headingFormatRules,
-            aiProvider,
+            gateway.forStage("headings"),
             batchQueue,
             logger,
         );
@@ -1068,6 +1058,10 @@ export const runTranslationJob = async ({
                 partialChapters: translationReport.partialChapters.length,
             },
             archivedInputPath,
+            extra: {
+                modelRouting: gateway.describe(),
+                usage: gateway.usage(),
+            },
         });
     } catch (error) {
         shouldKeepArtifacts = true;
@@ -1097,6 +1091,7 @@ export const runHtmlTranslationJob = async ({
     inputPath,
     debugMode = false,
     runtimeConfig,
+    modelName = null,
 }) => {
     const logDir = path.resolve(projectRoot, "log");
     const inputDir = path.resolve(projectRoot, "input");
@@ -1106,14 +1101,14 @@ export const runHtmlTranslationJob = async ({
     ensureDir(outputDir);
 
     const logger = createLogger(logDir);
-    const aiProvider = createAIProvider(
-        CURRENT_PROVIDER,
+    const gateway = createJobGateway({
+        projectRoot,
         runtimeConfig,
         logger,
-        FALLBACK_PROVIDER,
-        FALLBACK_ON_CONTENT_POLICY,
-    );
-    const glossaryProvider = createGlossaryProvider(logger, runtimeConfig);
+        modelName,
+    });
+    const aiProvider = gateway.forStage("translation");
+    const glossaryProvider = gateway.forStage("glossary");
     const batchQueue = createBatchQueue(aiProvider, logger);
 
     const fileInfo = path.parse(inputPath);
@@ -1135,12 +1130,13 @@ export const runHtmlTranslationJob = async ({
     console.log(`🐞 Debug: ${debugMode ? "on" : "off"}`);
     console.log(`🗣️ Source: ${runtimeConfig.sourceLanguage}`);
     console.log(`🌐 Target: ${runtimeConfig.targetLanguage}`);
-    if (runtimeConfig[CURRENT_PROVIDER]?.concurrency) {
+    if (runtimeConfig.concurrencyOverride) {
         console.log(
-            `⚙️ Concurrency: ${runtimeConfig[CURRENT_PROVIDER].concurrency}`,
+            `⚙️ Concurrency: ${runtimeConfig.concurrencyOverride}`,
         );
     }
     console.log(`🤖 Provider: ${aiProvider.providerName} (${aiProvider.modelName})`);
+    console.log(`🧭 Routing: ${formatRoutingSummary(gateway)}`);
     if (aiProvider.fallbackProviderName) {
         console.log(`🛟 Fallback: ${aiProvider.fallbackProviderName}`);
     }
@@ -1168,6 +1164,7 @@ export const runHtmlTranslationJob = async ({
                         projectRoot,
                         "html_translation_prompt.txt",
                     ),
+                    modelRoutingFingerprint: gateway.routing.fingerprint,
                 },
             }),
             { kind: "html" },
@@ -1186,7 +1183,7 @@ export const runHtmlTranslationJob = async ({
         } else {
             headingFormatRules = await analyzeHeadingFormats(
                 chapterMap,
-                aiProvider,
+                gateway.forStage("headings"),
                 logger,
                 runtimeConfig,
             );
@@ -1220,6 +1217,10 @@ export const runHtmlTranslationJob = async ({
             definedClasses,
             "html",
             debugMode,
+            {
+                criticProvider: gateway.forStage("critic"),
+                memoryProvider: gateway.forStage("memory"),
+            },
         );
         translationStatus = translationReport.status;
         await batchQueue.drainQueue();
@@ -1238,7 +1239,7 @@ export const runHtmlTranslationJob = async ({
         await standardizeHeadingsByRules(
             chapterMap,
             headingFormatRules,
-            aiProvider,
+            gateway.forStage("headings"),
             batchQueue,
             logger,
         );
@@ -1278,6 +1279,10 @@ export const runHtmlTranslationJob = async ({
                 partialChapters: translationReport.partialChapters.length,
             },
             archivedInputPath,
+            extra: {
+                modelRouting: gateway.describe(),
+                usage: gateway.usage(),
+            },
         });
     } catch (error) {
         shouldKeepArtifacts = true;
@@ -1309,6 +1314,7 @@ export const runPdfTranslationJob = async ({
     selectedPages = null,
     debugMode = false,
     runtimeConfig,
+    modelName = null,
 }) => {
     const logDir = path.resolve(projectRoot, "log");
     const inputDir = path.resolve(projectRoot, "input");
@@ -1318,14 +1324,14 @@ export const runPdfTranslationJob = async ({
     ensureDir(outputDir);
 
     const logger = createLogger(logDir);
-    const aiProvider = createAIProvider(
-        CURRENT_PROVIDER,
+    const gateway = createJobGateway({
+        projectRoot,
         runtimeConfig,
         logger,
-        FALLBACK_PROVIDER,
-        FALLBACK_ON_CONTENT_POLICY,
-    );
-    const glossaryProvider = createGlossaryProvider(logger, runtimeConfig);
+        modelName,
+    });
+    const aiProvider = gateway.forStage("translation");
+    const glossaryProvider = gateway.forStage("glossary");
     const batchQueue = createBatchQueue(aiProvider, logger);
 
     const fileInfo = path.parse(inputPath);
@@ -1370,15 +1376,16 @@ export const runPdfTranslationJob = async ({
     console.log(`🐞 Debug: ${debugMode ? "on" : "off"}`);
     console.log(`🗣️ Source: ${runtimeConfig.sourceLanguage}`);
     console.log(`🌐 Target: ${runtimeConfig.targetLanguage}`);
-    if (runtimeConfig[CURRENT_PROVIDER]?.concurrency) {
+    if (runtimeConfig.concurrencyOverride) {
         console.log(
-            `⚙️ Concurrency: ${runtimeConfig[CURRENT_PROVIDER].concurrency}`,
+            `⚙️ Concurrency: ${runtimeConfig.concurrencyOverride}`,
         );
     }
     if (pageSelector) {
         console.log(`📄 Pages: ${pageSelector}`);
     }
     console.log(`🤖 Provider: ${aiProvider.providerName} (${aiProvider.modelName})`);
+    console.log(`🧭 Routing: ${formatRoutingSummary(gateway)}`);
     if (aiProvider.fallbackProviderName) {
         console.log(`🛟 Fallback: ${aiProvider.fallbackProviderName}`);
     }
@@ -1402,6 +1409,7 @@ export const runPdfTranslationJob = async ({
                         projectRoot,
                         "pdf_translation_prompt.txt",
                     ),
+                    modelRoutingFingerprint: gateway.routing.fingerprint,
                 },
             }),
             { kind: "pdf" },
@@ -1487,6 +1495,10 @@ export const runPdfTranslationJob = async ({
             definedClasses,
             "pdf",
             debugMode,
+            {
+                criticProvider: gateway.forStage("critic"),
+                memoryProvider: gateway.forStage("memory"),
+            },
         );
         translationStatus = translationReport.status;
         await batchQueue.drainQueue();
@@ -1634,6 +1646,8 @@ export const runPdfTranslationJob = async ({
                 htmlOutputPath: outputHtmlPath,
                 validationPath: validationJsonPath,
                 pdfMappingReport,
+                modelRouting: gateway.describe(),
+                usage: gateway.usage(),
             },
         });
     } catch (error) {
@@ -1668,6 +1682,7 @@ export const runSubtitleTranslationJob = async ({
     debugMode = false,
     runtimeConfig,
     sourceLanguageExplicit = false,
+    modelName = null,
 }) => {
     const logDir = path.resolve(projectRoot, "log");
     const inputDir = path.resolve(projectRoot, "input");
@@ -1677,13 +1692,13 @@ export const runSubtitleTranslationJob = async ({
     ensureDir(outputDir);
 
     const logger = createLogger(logDir);
-    const aiProvider = createAIProvider(
-        CURRENT_PROVIDER,
+    const gateway = createJobGateway({
+        projectRoot,
         runtimeConfig,
         logger,
-        FALLBACK_PROVIDER,
-        FALLBACK_ON_CONTENT_POLICY,
-    );
+        modelName,
+    });
+    const aiProvider = gateway.forStage("translation");
     const batchQueue = createBatchQueue(aiProvider, logger);
 
     const fileInfo = path.parse(inputPath);
@@ -1721,12 +1736,13 @@ export const runSubtitleTranslationJob = async ({
     console.log(`🐞 Debug: ${debugMode ? "on" : "off"}`);
     console.log(`🗣️ Source: ${runtimeConfig.sourceLanguage}`);
     console.log(`🌐 Target: ${runtimeConfig.targetLanguage}`);
-    if (runtimeConfig[CURRENT_PROVIDER]?.concurrency) {
+    if (runtimeConfig.concurrencyOverride) {
         console.log(
-            `⚙️ Concurrency: ${runtimeConfig[CURRENT_PROVIDER].concurrency}`,
+            `⚙️ Concurrency: ${runtimeConfig.concurrencyOverride}`,
         );
     }
     console.log(`🤖 Provider: ${aiProvider.providerName} (${aiProvider.modelName})`);
+    console.log(`🧭 Routing: ${formatRoutingSummary(gateway)}`);
     if (aiProvider.fallbackProviderName) {
         console.log(`🛟 Fallback: ${aiProvider.fallbackProviderName}`);
     }
@@ -1807,6 +1823,7 @@ export const runSubtitleTranslationJob = async ({
                             projectRoot,
                             "subtitle_translation_prompt.txt",
                         ),
+                        modelRoutingFingerprint: gateway.routing.fingerprint,
                     },
                 }),
                 { kind: "subtitle", inputType: "video" },
@@ -1860,6 +1877,7 @@ export const runSubtitleTranslationJob = async ({
                             projectRoot,
                             "subtitle_translation_prompt.txt",
                         ),
+                        modelRoutingFingerprint: gateway.routing.fingerprint,
                     },
                 }),
                 { kind: "subtitle", inputType: "srt" },
@@ -1867,7 +1885,7 @@ export const runSubtitleTranslationJob = async ({
             );
         }
 
-        const glossaryProvider = createGlossaryProvider(logger, runtimeConfig);
+        const glossaryProvider = gateway.forStage("glossary");
 
         console.log("\n🧩 Step 3: Parsing subtitle cues to JSON...");
         const subtitleJson = buildSubtitleJson({
@@ -1926,6 +1944,10 @@ export const runSubtitleTranslationJob = async ({
             definedClasses,
             "subtitle",
             debugMode,
+            {
+                criticProvider: gateway.forStage("critic"),
+                memoryProvider: gateway.forStage("memory"),
+            },
         );
         translationStatus = translationReport.status;
         await batchQueue.drainQueue();
@@ -2000,6 +2022,8 @@ export const runSubtitleTranslationJob = async ({
             extra: {
                 translatedJsonPath,
                 translatedSrtPath,
+                modelRouting: gateway.describe(),
+                usage: gateway.usage(),
             },
         });
     } catch (error) {
@@ -2024,3 +2048,4 @@ export const runSubtitleTranslationJob = async ({
         }
     }
 };
+

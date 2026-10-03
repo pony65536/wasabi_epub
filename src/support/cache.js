@@ -2,8 +2,6 @@ import crypto from "crypto";
 import fs from "fs";
 import path from "path";
 
-const LOCK_STALE_MS = 6 * 60 * 60 * 1000;
-
 const atomicWrite = (file, content) => {
     const tmp = `${file}.tmp-${process.pid}-${Date.now()}`;
     fs.writeFileSync(tmp, content, "utf8");
@@ -102,11 +100,9 @@ export const createProgressCache = (cacheDir) => {
         }
 
         const info = safeReadJson(file);
-        const startedAt = Number(info?.startedAt || 0);
-        // 活跃进程的锁不能被抢走，即使锁龄超过阈值；只有持有进程已退出才回收
+        // 持有进程已退出 → 立即回收；进程存活 → 无论锁龄多长都不抢。
         const holderAlive = isProcessAlive(info?.pid);
-        const stale =
-            !holderAlive && (!startedAt || Date.now() - startedAt >= LOCK_STALE_MS);
+        const stale = !holderAlive;
         if (stale) {
             try {
                 fs.unlinkSync(file);

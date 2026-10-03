@@ -1,85 +1,17 @@
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import OpenAI from "openai";
 import { createRequestLimiter } from "./requestLimiter.js";
+import {
+    classifyProviderError,
+    isContentPolicyError,
+} from "../models/errors.js";
+import {
+    parseSseCompletion,
+    readCompletionContent,
+} from "../models/response.js";
 
-export const isContentPolicyError = (err) => {
-    const message = String(err?.message || "").toLowerCase();
-    if (!message) return false;
-
-    const hasContentPolicySignal =
-        message.includes("inappropriate content") ||
-        message.includes("content policy") ||
-        message.includes("content-filter") ||
-        message.includes("content filter") ||
-        message.includes("safety policy") ||
-        message.includes("violates safety");
-
-    if (!hasContentPolicySignal) return false;
-
-    const excludedSignals = [
-        "invalid json",
-        "json",
-        "timeout",
-        "timed out",
-        "rate limit",
-        "429",
-        "econnreset",
-        "socket hang up",
-    ];
-
-    return !excludedSignals.some((token) => message.includes(token));
-};
-
-export const classifyProviderError = (error) => {
-    const message = String(error?.message || "").toLowerCase();
-    const status = Number(error?.status || error?.response?.status || 0);
-
-    if (error?.code === "ETIMEDOUT" || message.includes("timed out")) {
-        return { category: "timeout", retryable: true };
-    }
-    if (
-        status === 401 ||
-        status === 403 ||
-        message.includes("unauthorized") ||
-        message.includes("invalid api key") ||
-        message.includes("api key")
-    ) {
-        return { category: "auth", retryable: false };
-    }
-    if (status === 429 || message.includes("rate limit")) {
-        return { category: "rate_limit", retryable: true };
-    }
-    if (
-        message.includes("deprecated") ||
-        message.includes("decommissioned") ||
-        message.includes("no longer available") ||
-        message.includes("model not found") ||
-        message.includes("unknown model")
-    ) {
-        return { category: "model_missing", retryable: false };
-    }
-    if (
-        message.includes("econnreset") ||
-        message.includes("socket hang up") ||
-        message.includes("fetch failed") ||
-        message.includes("network")
-    ) {
-        return { category: "network", retryable: true };
-    }
-    if (
-        message.includes("invalid json") ||
-        message.includes("missing or empty nodes") ||
-        message.includes("slot integrity") ||
-        message.includes("protected structure") ||
-        message.includes("invalid html")
-    ) {
-        return { category: "format", retryable: true };
-    }
-    if (isContentPolicyError(error)) {
-        return { category: "content_policy", retryable: true };
-    }
-    return { category: "unknown", retryable: true };
-};
+export { classifyProviderError, isContentPolicyError };
+export { parseSseCompletion, readCompletionContent };
 
 const buildDeprecatedModelGuidance = (client, err) => {
     const message = String(err?.message || "");
@@ -185,27 +117,19 @@ const buildProviderClient = (providerName, config) => {
             );
             // 兼容某些第三方中转站当传入 response_format 时强行返回 SSE string 的情况
             if (typeof completion === "string") {
-                // 防御性上限：异常巨大的字符串直接返回，不做 SSE 解析
-                if (completion.length > 10 * 1024 * 1024) {
-                    return completion.trim();
+                if (completion.includes("data:")) {
+                    const sseContent = parseSseCompletion(completion);
+                    if (sseContent) return sseContent;
+                    // 禁止把原始 SSE 协议内容当成译文写回（例如只有 reasoning 增量）
+                    const sseError = new Error(
+                        "SSE response contained no assistant content (reasoning-only or empty).",
+                    );
+                    sseError.code = "EMPTY_CONTENT";
+                    throw sseError;
                 }
-                const chunks = [];
-                for (const line of completion.split("\n")) {
-                    const trimmed = line.trim();
-                    if (!trimmed.startsWith("data:") || trimmed === "data: [DONE]") continue;
-                    try {
-                        const parsed = JSON.parse(trimmed.slice(5).trim());
-                        const content =
-                            parsed?.choices?.[0]?.delta?.content ||
-                            parsed?.choices?.[0]?.message?.content ||
-                            "";
-                        if (typeof content === "string" && content) chunks.push(content);
-                    } catch {}
-                }
-                if (chunks.length > 0) return chunks.join("").trim();
                 return completion.trim();
             }
-            return completion.choices[0].message.content.trim();
+            return readCompletionContent(completion);
         };
     }
 

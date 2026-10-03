@@ -41,7 +41,7 @@ const printUsageAndExit = (message) => {
 
     console.error("Usage:");
     console.error(
-        '  node index.js "your-book.epub|your-file.html|your-file.pdf|your-file.srt|your-video.mkv|your-video.mp4" [--chap "<selector>"] [--page "<selector>"] [--from "<lang>"] [--to "<lang>"] [--concurrency <n>] [--debug]',
+        '  node index.js "your-book.epub|your-file.html|your-file.pdf|your-file.srt|your-video.mkv|your-video.mp4" [--chap "<selector>"] [--page "<selector>"] [--from "<lang>"] [--to "<lang>"] [--model "<model-config>"] [--concurrency <n>] [--debug]',
     );
     console.error("  node index.js doctor");
     console.error("  node index.js setup --pdf");
@@ -49,6 +49,7 @@ const printUsageAndExit = (message) => {
     console.error("Examples:");
     console.error('  node index.js "book.epub"');
     console.error('  node index.js "book.epub" --chap "1,3,5"');
+    console.error('  node index.js "book.epub" --model "careful"');
     console.error('  node index.js "paper.pdf" --to "zh"');
     console.error("  node index.js doctor");
     console.error("  node index.js setup --pdf");
@@ -134,6 +135,7 @@ const parseCliArgs = (argv) => {
         sourceLanguage: DEFAULT_SOURCE_LANGUAGE,
         targetLanguage: DEFAULT_TARGET_LANGUAGE,
         sourceLanguageExplicit: false,
+        modelName: null,
         concurrency: null,
         debug: false,
     };
@@ -214,6 +216,25 @@ const parseCliArgs = (argv) => {
                 printUsageAndExit("Missing value after --to=.");
             }
             result.targetLanguage = resolveTargetLanguage(value);
+            continue;
+        }
+
+        if (arg === "--model") {
+            const nextValue = argv[i + 1];
+            if (!nextValue || nextValue.startsWith("--")) {
+                printUsageAndExit("Missing value after --model.");
+            }
+            result.modelName = nextValue.trim();
+            i++;
+            continue;
+        }
+
+        if (arg.startsWith("--model=")) {
+            const value = arg.slice("--model=".length).trim();
+            if (!value) {
+                printUsageAndExit("Missing value after --model=.");
+            }
+            result.modelName = value;
             continue;
         }
 
@@ -411,6 +432,7 @@ const runTranslation = async (cliArgs) => {
             chapterSelector: cliArgs.chapterSelector,
             debugMode: cliArgs.debug,
             runtimeConfig,
+            modelName: cliArgs.modelName,
         });
         return;
     }
@@ -427,6 +449,7 @@ const runTranslation = async (cliArgs) => {
             selectedPages,
             debugMode: cliArgs.debug,
             runtimeConfig,
+            modelName: cliArgs.modelName,
         });
         return;
     }
@@ -444,6 +467,7 @@ const runTranslation = async (cliArgs) => {
             inputPath,
             debugMode: cliArgs.debug,
             runtimeConfig,
+            modelName: cliArgs.modelName,
         });
         return;
     }
@@ -460,6 +484,7 @@ const runTranslation = async (cliArgs) => {
         inputPath,
         debugMode: cliArgs.debug,
         runtimeConfig,
+        modelName: cliArgs.modelName,
         sourceLanguageExplicit: cliArgs.sourceLanguageExplicit,
     });
 };
@@ -492,3 +517,4 @@ const main = async () => {
 };
 
 main();
+

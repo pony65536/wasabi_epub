@@ -17,6 +17,28 @@ import { INLINE_TAG_NAMES } from "../content/inlineSlots.js";
 
 const PROTECTED_ATTRIBUTES = ["id", "href", "class", "name", "src", "epub:type"];
 
+// 正文块结构：容器被整段翻译时，模型不得删除/扁平化这些结构
+const BODY_BLOCK_TAGS = new Set([
+    "ul",
+    "ol",
+    "li",
+    "p",
+    "blockquote",
+    "h1",
+    "h2",
+    "h3",
+    "h4",
+    "h5",
+    "h6",
+    "table",
+    "figure",
+    "figcaption",
+    "dl",
+    "dt",
+    "dd",
+    "pre",
+]);
+
 const tagOf = (el) => String(el?.tagName || el?.name || "").toLowerCase();
 
 const hasProtectedAttribute = ($el) =>
@@ -40,9 +62,26 @@ export const collectProtectedStructure = (html) => {
     const signatures = [];
     const nesting = [];
     const identities = new Map();
+    const bodySignatures = [];
+    const bodyNesting = [];
 
     $("ws-root *").each((_, el) => {
+        const tag = tagOf(el);
         const $el = $(el);
+        if (BODY_BLOCK_TAGS.has(tag)) {
+            bodySignatures.push(tag);
+            let ancestor = el.parent;
+            let parentTag = "root";
+            while (ancestor) {
+                const ancestorTag = tagOf(ancestor);
+                if (BODY_BLOCK_TAGS.has(ancestorTag)) {
+                    parentTag = ancestorTag;
+                    break;
+                }
+                ancestor = ancestor.parent;
+            }
+            bodyNesting.push(`${parentTag}>${tag}`);
+        }
         if (!isProtectedElement(el, $el)) return;
         const identity = identityOf(el, $el);
         identities.set(el, identity);
@@ -64,7 +103,9 @@ export const collectProtectedStructure = (html) => {
 
     signatures.sort();
     nesting.sort();
-    return { signatures, nesting };
+    bodySignatures.sort();
+    bodyNesting.sort();
+    return { signatures, nesting, bodySignatures, bodyNesting };
 };
 
 const diffMultiset = (before, after) => {
@@ -91,11 +132,23 @@ export const validateProtectedStructure = (beforeHtml, afterHtml) => {
     const after = collectProtectedStructure(afterHtml);
     const signatureDiff = diffMultiset(before.signatures, after.signatures);
     const nestingDiff = diffMultiset(before.nesting, after.nesting);
+    const bodyDiff = diffMultiset(
+        before.bodySignatures,
+        after.bodySignatures,
+    );
+    const bodyNestingDiff = diffMultiset(
+        before.bodyNesting,
+        after.bodyNesting,
+    );
     const ok =
         signatureDiff.missing.length === 0 &&
         signatureDiff.unexpected.length === 0 &&
         nestingDiff.missing.length === 0 &&
-        nestingDiff.unexpected.length === 0;
+        nestingDiff.unexpected.length === 0 &&
+        bodyDiff.missing.length === 0 &&
+        bodyDiff.unexpected.length === 0 &&
+        bodyNestingDiff.missing.length === 0 &&
+        bodyNestingDiff.unexpected.length === 0;
 
     return {
         ok,
@@ -103,5 +156,9 @@ export const validateProtectedStructure = (beforeHtml, afterHtml) => {
         unexpectedAttributes: signatureDiff.unexpected,
         missingNesting: nestingDiff.missing,
         unexpectedNesting: nestingDiff.unexpected,
+        missingBodyBlocks: bodyDiff.missing,
+        unexpectedBodyBlocks: bodyDiff.unexpected,
+        missingBodyNesting: bodyNestingDiff.missing,
+        unexpectedBodyNesting: bodyNestingDiff.unexpected,
     };
 };
