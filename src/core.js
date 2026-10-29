@@ -16,6 +16,11 @@ import { createAIProvider } from "./translation/aiProvider.js";
 import { createProgressCache } from "./support/cache.js";
 import { selectChaptersBySpec } from "./support/chapterSelection.js";
 import {
+    ensureDir,
+    moveFileIfNeeded,
+    saveHtmlDocument,
+} from "./support/files.js";
+import {
     createSelectionSlug,
     getLanguageFileCode,
 } from "./support/naming.js";
@@ -328,39 +333,6 @@ const logPdfDoclingSummary = (pdfJson) => {
     }
 };
 
-const ensureDir = (dirPath) => {
-    if (!fs.existsSync(dirPath)) {
-        fs.mkdirSync(dirPath, { recursive: true });
-    }
-};
-
-const moveFileIfNeeded = (sourcePath, targetPath) => {
-    const resolvedSource = path.resolve(sourcePath);
-    const resolvedTarget = path.resolve(targetPath);
-    if (resolvedSource === resolvedTarget) return;
-    ensureDir(path.dirname(resolvedTarget));
-    if (fs.existsSync(resolvedTarget)) {
-        fs.unlinkSync(resolvedTarget);
-    }
-    try {
-        fs.renameSync(resolvedSource, resolvedTarget);
-        return;
-    } catch (error) {
-        if (!["EPERM", "EXDEV", "EBUSY"].includes(error?.code)) {
-            throw error;
-        }
-    }
-
-    fs.copyFileSync(resolvedSource, resolvedTarget);
-    try {
-        fs.unlinkSync(resolvedSource);
-    } catch {
-        console.warn(
-            `⚠️  Source file could not be removed after copying to input: ${path.basename(resolvedSource)}`,
-        );
-    }
-};
-
 const collectReferencedIds = (chapterMap) => {
     const referencedIds = new Set();
     for (const chapter of chapterMap.values()) {
@@ -533,17 +505,6 @@ const sanitizeCachedPlan = (plan, chapterMap, logger) => {
         ...plan,
         sorted,
     };
-};
-
-const saveHtmlDocument = async (outputPath, html, logger) => {
-    console.log(`\n💾 Step 5: Finalizing and Saving...`);
-    try {
-        fs.writeFileSync(outputPath, html, "utf8");
-        console.log(`🎉 Done! Output: ${path.basename(outputPath)}`);
-    } catch (error) {
-        logger.write("ERROR", `Save HTML Failed: ${error.stack || error.message}`);
-        throw error;
-    }
 };
 
 const VIDEO_INPUT_EXTENSIONS = new Set([".mkv", ".mp4", ".mov", ".m4v", ".webm"]);
