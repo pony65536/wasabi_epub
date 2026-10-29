@@ -28,6 +28,7 @@ import {
     detectEpubBookStructuralMode,
     performTranslation,
 } from "./translation/translator.js";
+import { shouldRetainArtifacts } from "./pipeline/artifactPolicy.js";
 import { synchronizeTocHtml, synchronizeNcx } from "./epub/tocSync.js";
 import { saveEpub } from "./epub/epubSaver.js";
 import {
@@ -629,7 +630,7 @@ export const runTranslationJob = async ({
     }
     console.log(`========================================\n`);
 
-    let shouldKeepArtifacts = debugMode;
+    let completed = false;
 
     try {
         const zip = new AdmZip(inputPath);
@@ -774,6 +775,7 @@ export const runTranslationJob = async ({
         moveFileIfNeeded(inputPath, finalInputPath);
 
         console.log(`\n✅ All done! Output: ${path.basename(outputPath)}`);
+        completed = true;
         return { outputPath, cacheDir, logFile: logger.logFile };
     } catch (error) {
         logger.write(
@@ -782,7 +784,12 @@ export const runTranslationJob = async ({
         );
         throw error;
     } finally {
-        if (!shouldKeepArtifacts) {
+        const keepArtifacts = shouldRetainArtifacts({
+            completed,
+            debugMode,
+            retainOnFailure: false,
+        });
+        if (!keepArtifacts) {
             cache.removeDir();
             logger.remove();
         }
@@ -840,7 +847,7 @@ export const runHtmlTranslationJob = async ({
     }
     console.log(`========================================\n`);
 
-    let shouldKeepArtifacts = debugMode;
+    let completed = false;
 
     try {
         const chapterMap = createSingleHtmlChapterMap(inputPath);
@@ -921,6 +928,7 @@ export const runHtmlTranslationJob = async ({
         moveFileIfNeeded(inputPath, finalInputPath);
 
         console.log(`\n✅ All done! Output: ${path.basename(outputPath)}`);
+        completed = true;
         return { outputPath, cacheDir, logFile: logger.logFile };
     } catch (error) {
         logger.write(
@@ -929,7 +937,12 @@ export const runHtmlTranslationJob = async ({
         );
         throw error;
     } finally {
-        if (!shouldKeepArtifacts) {
+        const keepArtifacts = shouldRetainArtifacts({
+            completed,
+            debugMode,
+            retainOnFailure: false,
+        });
+        if (!keepArtifacts) {
             cache.removeDir();
             logger.remove();
         }
@@ -1202,7 +1215,12 @@ export const runPdfTranslationJob = async ({
         );
         throw error;
     } finally {
-        if (completed && !debugMode) {
+        const keepArtifacts = shouldRetainArtifacts({
+            completed,
+            debugMode,
+            retainOnFailure: true,
+        });
+        if (!keepArtifacts) {
             cache.removeDir();
             logger.remove();
         } else if (!completed) {
@@ -1281,7 +1299,7 @@ export const runSubtitleTranslationJob = async ({
     }
     console.log(`========================================\n`);
 
-    let shouldKeepArtifacts = debugMode;
+    let completed = false;
 
     try {
         let sourceSrtPath = inputPath;
@@ -1461,6 +1479,7 @@ export const runSubtitleTranslationJob = async ({
         moveFileIfNeeded(inputPath, finalInputPath);
 
         console.log(`\n✅ All done! Output: ${path.basename(outputPath)}`);
+        completed = true;
         return {
             outputPath,
             cacheDir,
@@ -1469,14 +1488,18 @@ export const runSubtitleTranslationJob = async ({
             translatedSrtPath,
         };
     } catch (error) {
-        shouldKeepArtifacts = true;
         logger.write(
             "ERROR",
             `Subtitle Process Fatal Error: ${error.stack || error.message}`,
         );
         throw error;
     } finally {
-        if (!shouldKeepArtifacts) {
+        const keepArtifacts = shouldRetainArtifacts({
+            completed,
+            debugMode,
+            retainOnFailure: true,
+        });
+        if (!keepArtifacts) {
             cache.removeDir();
             logger.remove();
         }
