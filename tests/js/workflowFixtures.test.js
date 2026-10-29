@@ -87,7 +87,28 @@ test("HTML workflow fixture reuses cache and archives the input", async (t) => {
     assert.equal(fs.existsSync(inputPath), false);
     assert.equal(fs.existsSync(cacheDir), false);
     assert.deepEqual(fs.readdirSync(path.join(projectRoot, "log")), []);
-    assert.ok(lines.some((line) => line.includes("doc.html")));
+
+    const bannerStart = lines.findIndex((line) => line.includes("====="));
+    const banner = lines
+        .slice(bannerStart, bannerStart + 11)
+        .map((line) =>
+            line
+                .replace(/^🤖 Provider: .*/, "🤖 Provider: <provider>")
+                .replace(/^🛟 Fallback: .*/, "🛟 Fallback: <fallback>"),
+        );
+    assert.deepEqual(banner, [
+        "\n========================================",
+        "📄 Input:  doc.html",
+        "💾 Output: doc_zh.html",
+        "📦 Cache:  .cache_doc_html",
+        "🐞 Debug: off",
+        "🗣️ Source: English",
+        "🌐 Target: Chinese (Simplified)",
+        "⚙️ Concurrency: 5",
+        "🤖 Provider: <provider>",
+        "🛟 Fallback: <fallback>",
+        "========================================\n",
+    ]);
 });
 
 test("Subtitle workflow fixture reuses cache and writes translated cues", async (t) => {

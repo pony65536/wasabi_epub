@@ -1,24 +1,18 @@
 import fs from "fs";
 import path from "path";
 
-import {
-    CURRENT_PROVIDER,
-    FALLBACK_PROVIDER,
-    FALLBACK_ON_CONTENT_POLICY,
-} from "../config.js";
 import { generateInitialGlossary } from "../content/glossary.js";
 import { collectReferencedIds } from "../epub/chapterMap.js";
-import { shouldRetainArtifacts } from "../pipeline/artifactPolicy.js";
-import { createProgressCache } from "../support/cache.js";
-import { ensureDir, moveFileIfNeeded } from "../support/files.js";
-import { createLogger } from "../support/logger.js";
+import {
+    createJobContext,
+    finishJob,
+    printJobBanner,
+} from "../pipeline/jobContext.js";
+import { moveFileIfNeeded } from "../support/files.js";
 import {
     createSelectionSlug,
     getLanguageFileCode,
 } from "../support/naming.js";
-import { createAIProvider } from "../translation/aiProvider.js";
-import { createBatchQueue } from "../translation/batchQueue.js";
-import { createGlossaryProvider } from "../translation/glossaryProvider.js";
 import { performTranslation } from "../translation/translator.js";
 import {
     extractPdfToJson,
@@ -40,24 +34,7 @@ export const runPdfTranslationJob = async ({
     debugMode = false,
     runtimeConfig,
 }) => {
-    const logDir = path.resolve(projectRoot, "log");
-    const inputDir = path.resolve(projectRoot, "input");
     const outputDir = path.resolve(projectRoot, "output");
-    ensureDir(logDir);
-    ensureDir(inputDir);
-    ensureDir(outputDir);
-
-    const logger = createLogger(logDir);
-    const aiProvider = createAIProvider(
-        CURRENT_PROVIDER,
-        runtimeConfig,
-        logger,
-        FALLBACK_PROVIDER,
-        FALLBACK_ON_CONTENT_POLICY,
-    );
-    const glossaryProvider = createGlossaryProvider(logger, runtimeConfig);
-    const batchQueue = createBatchQueue(aiProvider, logger);
-
     const fileInfo = path.parse(inputPath);
     const selectionSlug = createSelectionSlug(pageSelector);
     const targetLanguageSlug = getLanguageFileCode(runtimeConfig.targetLanguage);
@@ -79,40 +56,33 @@ export const runPdfTranslationJob = async ({
             ? `.cache_${fileInfo.name}_page-${selectionSlug}_pdf`
             : `.cache_${fileInfo.name}_pdf`,
     );
-    const cache = createProgressCache(cacheDir);
+    const debugHtmlPath = debugMode
+        ? path.resolve(
+              outputDir,
+              pageSelector
+                  ? `${fileInfo.name}_page-${selectionSlug}_${targetLanguageSlug}.html`
+                  : `${fileInfo.name}_${targetLanguageSlug}.html`,
+          )
+        : null;
+    const ctx = createJobContext({
+        projectRoot,
+        inputPath,
+        runtimeConfig,
+        debugMode,
+        cacheDir,
+    });
+    const { logger, aiProvider, batchQueue, cache } = ctx;
     const extractedJsonPath = path.resolve(cacheDir, "pdf_blocks.json");
     const translatedJsonPath = path.resolve(cacheDir, "pdf_blocks_translated.json");
     const debugSummaryPath = path.resolve(cacheDir, "pdf_blocks_debug.json");
 
-    console.log(`\n========================================`);
-    console.log(`📕 Input:  ${path.basename(inputPath)}`);
-    console.log(`💾 Output: ${path.basename(outputPdfPath)}`);
-    if (debugMode) {
-        const outputHtmlPath = path.resolve(
-            outputDir,
-            pageSelector
-                ? `${fileInfo.name}_page-${selectionSlug}_${targetLanguageSlug}.html`
-                : `${fileInfo.name}_${targetLanguageSlug}.html`,
-        );
-        console.log(`📄 HTML:   ${path.basename(outputHtmlPath)}`);
-    }
-    console.log(`📦 Cache:  ${path.basename(cacheDir)}`);
-    console.log(`🐞 Debug: ${debugMode ? "on" : "off"}`);
-    console.log(`🗣️ Source: ${runtimeConfig.sourceLanguage}`);
-    console.log(`🌐 Target: ${runtimeConfig.targetLanguage}`);
-    if (runtimeConfig[CURRENT_PROVIDER]?.concurrency) {
-        console.log(
-            `⚙️ Concurrency: ${runtimeConfig[CURRENT_PROVIDER].concurrency}`,
-        );
-    }
-    if (pageSelector) {
-        console.log(`📄 Pages: ${pageSelector}`);
-    }
-    console.log(`🤖 Provider: ${aiProvider.providerName} (${aiProvider.modelName})`);
-    if (aiProvider.fallbackProviderName) {
-        console.log(`🛟 Fallback: ${aiProvider.fallbackProviderName}`);
-    }
-    console.log(`========================================\n`);
+    printJobBanner(ctx, {
+        inputIcon: "📕",
+        inputName: path.basename(inputPath),
+        outputName: path.basename(outputPdfPath),
+        htmlName: debugHtmlPath ? path.basename(debugHtmlPath) : null,
+        pageSelector,
+    });
 
     let completed = false;
 
@@ -176,7 +146,7 @@ export const runPdfTranslationJob = async ({
         } else {
             glossary = await generateInitialGlossary(
                 chapterMap,
-                glossaryProvider,
+                ctx.glossaryProvider,
                 logger,
                 runtimeConfig,
             );
@@ -206,14 +176,8 @@ export const runPdfTranslationJob = async ({
         }
 
         const translatedHtml = chapterMap.get("document").html;
-        let outputHtmlPath = null;
+        const outputHtmlPath = debugHtmlPath;
         if (debugMode) {
-            outputHtmlPath = path.resolve(
-                outputDir,
-                pageSelector
-                    ? `${fileInfo.name}_page-${selectionSlug}_${targetLanguageSlug}.html`
-                    : `${fileInfo.name}_${targetLanguageSlug}.html`,
-            );
             console.log(`\n💾 Step 4: Saving translated HTML snapshot...`);
             fs.writeFileSync(outputHtmlPath, translatedHtml, "utf8");
         }
@@ -272,7 +236,7 @@ export const runPdfTranslationJob = async ({
             `   Validation: status=${validationReport.status} issues=${validationReport.issues?.length || 0}`,
         );
 
-        const finalInputPath = path.resolve(inputDir, path.basename(inputPath));
+        const finalInputPath = path.resolve(ctx.inputDir, path.basename(inputPath));
         moveFileIfNeeded(inputPath, finalInputPath);
 
         if (validationReport.status === "ok") {
@@ -298,15 +262,11 @@ export const runPdfTranslationJob = async ({
         );
         throw error;
     } finally {
-        const keepArtifacts = shouldRetainArtifacts({
+        const keepArtifacts = finishJob(ctx, {
             completed,
-            debugMode,
             retainOnFailure: true,
         });
-        if (!keepArtifacts) {
-            cache.removeDir();
-            logger.remove();
-        } else if (!completed) {
+        if (keepArtifacts && !completed) {
             logger.write(
                 "WARN",
                 `PDF rendering failed; cache retained for debugging: ${cacheDir}`,

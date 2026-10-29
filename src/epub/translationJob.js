@@ -1,29 +1,23 @@
 import AdmZip from "adm-zip";
 import path from "path";
 
-import {
-    CURRENT_PROVIDER,
-    FALLBACK_PROVIDER,
-    FALLBACK_ON_CONTENT_POLICY,
-} from "../config.js";
 import { planTranslationOrder } from "../agent.js";
 import {
     analyzeHeadingFormats,
     standardizeHeadingsByRules,
 } from "../content/headings.js";
 import { generateInitialGlossary } from "../content/glossary.js";
-import { shouldRetainArtifacts } from "../pipeline/artifactPolicy.js";
-import { createProgressCache } from "../support/cache.js";
+import {
+    createJobContext,
+    finishJob,
+    printJobBanner,
+} from "../pipeline/jobContext.js";
 import { selectChaptersBySpec } from "../support/chapterSelection.js";
-import { ensureDir, moveFileIfNeeded } from "../support/files.js";
-import { createLogger } from "../support/logger.js";
+import { moveFileIfNeeded } from "../support/files.js";
 import {
     createSelectionSlug,
     getLanguageFileCode,
 } from "../support/naming.js";
-import { createAIProvider } from "../translation/aiProvider.js";
-import { createBatchQueue } from "../translation/batchQueue.js";
-import { createGlossaryProvider } from "../translation/glossaryProvider.js";
 import {
     detectEpubBookStructuralMode,
     performTranslation,
@@ -50,24 +44,7 @@ export const runTranslationJob = async ({
     debugMode = false,
     runtimeConfig,
 }) => {
-    const logDir = path.resolve(projectRoot, "log");
-    const inputDir = path.resolve(projectRoot, "input");
     const outputDir = path.resolve(projectRoot, "output");
-    ensureDir(logDir);
-    ensureDir(inputDir);
-    ensureDir(outputDir);
-
-    const logger = createLogger(logDir);
-    const aiProvider = createAIProvider(
-        CURRENT_PROVIDER,
-        runtimeConfig,
-        logger,
-        FALLBACK_PROVIDER,
-        FALLBACK_ON_CONTENT_POLICY,
-    );
-    const glossaryProvider = createGlossaryProvider(logger, runtimeConfig);
-    const batchQueue = createBatchQueue(aiProvider, logger);
-
     const fileInfo = path.parse(inputPath);
     const selectionSlug = createSelectionSlug(chapterSelector);
     const targetLanguageSlug = getLanguageFileCode(runtimeConfig.targetLanguage);
@@ -81,28 +58,21 @@ export const runTranslationJob = async ({
             ? `.cache_${fileInfo.name}_chap-${selectionSlug}`
             : `.cache_${fileInfo.name}`,
     );
-    const cache = createProgressCache(cacheDir);
+    const ctx = createJobContext({
+        projectRoot,
+        inputPath,
+        runtimeConfig,
+        debugMode,
+        cacheDir,
+    });
+    const { logger, aiProvider, batchQueue, cache } = ctx;
 
-    console.log(`\n========================================`);
-    console.log(`📖 Input:  ${path.basename(inputPath)}`);
-    console.log(`💾 Output: ${path.basename(outputPath)}`);
-    console.log(`📦 Cache:  ${path.basename(cacheDir)}`);
-    console.log(`🐞 Debug: ${debugMode ? "on" : "off"}`);
-    console.log(`🗣️ Source: ${runtimeConfig.sourceLanguage}`);
-    console.log(`🌐 Target: ${runtimeConfig.targetLanguage}`);
-    if (runtimeConfig[CURRENT_PROVIDER]?.concurrency) {
-        console.log(
-            `⚙️ Concurrency: ${runtimeConfig[CURRENT_PROVIDER].concurrency}`,
-        );
-    }
-    console.log(`🤖 Provider: ${aiProvider.providerName} (${aiProvider.modelName})`);
-    if (aiProvider.fallbackProviderName) {
-        console.log(`🛟 Fallback: ${aiProvider.fallbackProviderName}`);
-    }
-    if (chapterSelector) {
-        console.log(`🎯 Chapters: ${chapterSelector}`);
-    }
-    console.log(`========================================\n`);
+    printJobBanner(ctx, {
+        inputIcon: "📖",
+        inputName: path.basename(inputPath),
+        outputName: path.basename(outputPath),
+        chapterSelector,
+    });
 
     let completed = false;
 
@@ -187,7 +157,7 @@ export const runTranslationJob = async ({
         } else {
             glossary = await generateInitialGlossary(
                 selectedChapterMap,
-                glossaryProvider,
+                ctx.glossaryProvider,
                 logger,
                 runtimeConfig,
             );
@@ -245,7 +215,7 @@ export const runTranslationJob = async ({
             logger,
         );
 
-        const finalInputPath = path.resolve(inputDir, path.basename(inputPath));
+        const finalInputPath = path.resolve(ctx.inputDir, path.basename(inputPath));
         moveFileIfNeeded(inputPath, finalInputPath);
 
         console.log(`\n✅ All done! Output: ${path.basename(outputPath)}`);
@@ -258,14 +228,6 @@ export const runTranslationJob = async ({
         );
         throw error;
     } finally {
-        const keepArtifacts = shouldRetainArtifacts({
-            completed,
-            debugMode,
-            retainOnFailure: false,
-        });
-        if (!keepArtifacts) {
-            cache.removeDir();
-            logger.remove();
-        }
+        finishJob(ctx, { completed, retainOnFailure: false });
     }
 };

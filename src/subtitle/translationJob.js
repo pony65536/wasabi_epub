@@ -1,20 +1,14 @@
 import fs from "fs";
 import path from "path";
 
-import {
-    CURRENT_PROVIDER,
-    FALLBACK_PROVIDER,
-    FALLBACK_ON_CONTENT_POLICY,
-} from "../config.js";
 import { generateInitialGlossary } from "../content/glossary.js";
-import { shouldRetainArtifacts } from "../pipeline/artifactPolicy.js";
-import { createProgressCache } from "../support/cache.js";
-import { ensureDir, moveFileIfNeeded } from "../support/files.js";
-import { createLogger } from "../support/logger.js";
+import {
+    createJobContext,
+    finishJob,
+    printJobBanner,
+} from "../pipeline/jobContext.js";
+import { moveFileIfNeeded } from "../support/files.js";
 import { getLanguageFileCode } from "../support/naming.js";
-import { createAIProvider } from "../translation/aiProvider.js";
-import { createBatchQueue } from "../translation/batchQueue.js";
-import { createGlossaryProvider } from "../translation/glossaryProvider.js";
 import { performTranslation } from "../translation/translator.js";
 import {
     applyTranslatedHtmlToSubtitleJson,
@@ -43,23 +37,7 @@ export const runSubtitleTranslationJob = async ({
     runtimeConfig,
     sourceLanguageExplicit = false,
 }) => {
-    const logDir = path.resolve(projectRoot, "log");
-    const inputDir = path.resolve(projectRoot, "input");
     const outputDir = path.resolve(projectRoot, "output");
-    ensureDir(logDir);
-    ensureDir(inputDir);
-    ensureDir(outputDir);
-
-    const logger = createLogger(logDir);
-    const aiProvider = createAIProvider(
-        CURRENT_PROVIDER,
-        runtimeConfig,
-        logger,
-        FALLBACK_PROVIDER,
-        FALLBACK_ON_CONTENT_POLICY,
-    );
-    const batchQueue = createBatchQueue(aiProvider, logger);
-
     const fileInfo = path.parse(inputPath);
     const inputExt = fileInfo.ext.toLowerCase();
     const isVideoInput = VIDEO_INPUT_EXTENSIONS.has(inputExt);
@@ -71,7 +49,15 @@ export const runSubtitleTranslationJob = async ({
             : `${fileInfo.name}_${targetLanguageSlug}.srt`,
     );
     const cacheDir = path.resolve(projectRoot, `.cache_${fileInfo.name}_subtitle`);
-    const cache = createProgressCache(cacheDir);
+    const ctx = createJobContext({
+        projectRoot,
+        inputPath,
+        runtimeConfig,
+        debugMode,
+        cacheDir,
+        deferGlossaryProvider: true,
+    });
+    const { logger, aiProvider, batchQueue, cache } = ctx;
     const extractedSrtBasePath = path.resolve(cacheDir, "source_subtitle");
     const sourceJsonPath = path.resolve(cacheDir, "subtitle_cues.json");
     const translatedJsonPath = path.resolve(
@@ -83,25 +69,11 @@ export const runSubtitleTranslationJob = async ({
         : outputPath;
     const streamProbePath = path.resolve(cacheDir, "subtitle_streams.json");
 
-    console.log(`\n========================================`);
-    console.log(
-        `${isVideoInput ? "🎬" : "🎞️"} Input:  ${path.basename(inputPath)}`,
-    );
-    console.log(`💾 Output: ${path.basename(outputPath)}`);
-    console.log(`📦 Cache:  ${path.basename(cacheDir)}`);
-    console.log(`🐞 Debug: ${debugMode ? "on" : "off"}`);
-    console.log(`🗣️ Source: ${runtimeConfig.sourceLanguage}`);
-    console.log(`🌐 Target: ${runtimeConfig.targetLanguage}`);
-    if (runtimeConfig[CURRENT_PROVIDER]?.concurrency) {
-        console.log(
-            `⚙️ Concurrency: ${runtimeConfig[CURRENT_PROVIDER].concurrency}`,
-        );
-    }
-    console.log(`🤖 Provider: ${aiProvider.providerName} (${aiProvider.modelName})`);
-    if (aiProvider.fallbackProviderName) {
-        console.log(`🛟 Fallback: ${aiProvider.fallbackProviderName}`);
-    }
-    console.log(`========================================\n`);
+    printJobBanner(ctx, {
+        inputIcon: isVideoInput ? "🎬" : "🎞️",
+        inputName: path.basename(inputPath),
+        outputName: path.basename(outputPath),
+    });
 
     let completed = false;
 
@@ -184,7 +156,7 @@ export const runSubtitleTranslationJob = async ({
                 inferSubtitleLanguageFromFile(srtContent) ||
                 runtimeConfig.sourceLanguage;
         }
-        const glossaryProvider = createGlossaryProvider(logger, runtimeConfig);
+        const glossaryProvider = ctx.getGlossaryProvider();
 
         console.log("\n🧩 Step 3: Parsing subtitle cues to JSON...");
         const subtitleJson = buildSubtitleJson({
@@ -279,7 +251,7 @@ export const runSubtitleTranslationJob = async ({
             });
         }
 
-        const finalInputPath = path.resolve(inputDir, path.basename(inputPath));
+        const finalInputPath = path.resolve(ctx.inputDir, path.basename(inputPath));
         moveFileIfNeeded(inputPath, finalInputPath);
 
         console.log(`\n✅ All done! Output: ${path.basename(outputPath)}`);
@@ -298,14 +270,6 @@ export const runSubtitleTranslationJob = async ({
         );
         throw error;
     } finally {
-        const keepArtifacts = shouldRetainArtifacts({
-            completed,
-            debugMode,
-            retainOnFailure: true,
-        });
-        if (!keepArtifacts) {
-            cache.removeDir();
-            logger.remove();
-        }
+        finishJob(ctx, { completed, retainOnFailure: true });
     }
 };
