@@ -66,6 +66,7 @@ PDF Special Path
 │  ├─ html/                  # HTML job
 │  ├─ subtitle/              # 字幕 job 与 SRT/视频处理
 │  └─ pdf/                   # PDF job、repair、HTML 映射与 Python 子系统
+├─ config/                   # 模型登记与选型（example 提交，local 忽略）
 ├─ prompts/                  # 各模式 Prompt 模板
 ├─ tests/                    # Node 单测、工作流 fixture 与 Python 测试
 ├─ input/                    # 输入文件归档目录
@@ -134,18 +135,18 @@ PDF Special Path
 
 `src/translation/aiProvider.js` 封装所有模型调用差异：
 
-- `gemini` 使用 `@google/generative-ai`
-- `qwen`、`mimo`、`openrouter` 统一走 OpenAI 兼容接口
-- 主 Provider 调用失败时，如果命中内容安全策略，可自动回退到 fallback provider
-- 对废弃模型、不可用模型追加更明确的配置提示
+- SDK 由模型条目的 `sdk` 决定：`openai` 或 `@google/generative-ai`
+- 主模型命中内容安全策略时，可回退到 `selection.fallback` 指定的模型
+- 对废弃模型追加指向 `config/wasabi.local.json` 模型条目的提示
 
-运行时配置由 `src/config.js` 生成，支持：
+运行时配置由 `src/config.js` 的 `loadRuntimeConfig` 生成：
 
-- 主 provider / fallback provider
-- 模型名覆盖
-- 并发数覆盖
-- OpenRouter reasoning 开关
-- 术语表专用模型配置
+- 读取 `config/wasabi.local.json`，或由 `WASABI_CONFIG` 指定路径
+- 校验模型登记、SDK、URL、`requestOptions` 与 `selection` 引用
+- 解析 `primary`、可选 `fallback`、`glossary.default`
+- 俄/日 glossary 模型只保存 ID，在源语言确定后再解析 Key
+- `--concurrency` 只覆盖本次运行，不回写配置
+- 超时由 facade 统一 `withTimeout` 执行，两种 SDK 行为一致
 
 ### 6.2 批处理与重试
 
@@ -415,12 +416,13 @@ PDF 在失败时还会写一条说明缓存保留位置的 WARN 日志。
 3. `src/core.js` 与 `src/pipeline/jobContext.js`
 4. `src/pipeline/translateDocument.js`
 5. 任一格式的 `translationJob.js`（建议从 `src/html/` 开始）
-6. `src/config.js`
+6. `src/config.js` 与 `config/wasabi.example.json`
 7. `src/translation/translator.js`
 8. `src/translation/aiProvider.js`
-9. `src/content/glossary.js`
-10. `src/subtitle/video.js`
-11. `src/pdf/README.md`
-12. `src/pdf/pdfBridge.js` 与 `src/pdf/translate_pdf.py`
+9. `src/translation/sdk/*`
+10. `src/content/glossary.js`
+11. `src/subtitle/video.js`
+12. `src/pdf/README.md`
+13. `src/pdf/pdfBridge.js` 与 `src/pdf/translate_pdf.py`
 
 这样能先理解系统边界，再进入各个复杂子模块。

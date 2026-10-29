@@ -63,45 +63,33 @@ npm install
 
 ## 配置
 
-在项目根目录创建 `.env`。
+模型登记和选型放在 `config/wasabi.local.json`，API Key 放在 `.env`。
 
-可以直接参考 [.env_example](/f:/wasabi/wasabi_fork/wasabi_epub/.env_example:1)。
+先复制模板：
 
-最小示例：
+```bash
+cp config/wasabi.example.json config/wasabi.local.json
+```
+
+在 `.env` 中只保留 Key 和本机设置（Key 名必须与模型条目里的 `apiKeyEnv` 一致）：
 
 ```env
-PRIMARY_PROVIDER=qwen
-PRIMARY_MODEL=qwen-plus
-
-FALLBACK_ON_CONTENT_POLICY=true
-FALLBACK_PROVIDER=openrouter
-FALLBACK_MODEL=x-ai/grok-4.3
-
 QWEN_API_KEY=your_qwen_api_key
 OPENROUTER_API_KEY=your_openrouter_api_key
+
+# 可选：
+# GEMINI_API_KEY=your_gemini_api_key
+# MIMO_API_KEY=your_mimo_api_key
+# WASABI_CONFIG=config/wasabi.local.json
 ```
 
-如果你使用别的 provider，也可以配置：
-
-```env
-GEMINI_API_KEY=your_gemini_api_key
-MIMO_API_KEY=your_mimo_api_key
-
-# 可选：覆盖默认 base URL
-# QWEN_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
-# MIMO_BASE_URL=https://api.xiaomimimo.com/v1
-# OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
-
-# 可选：OpenRouter reasoning 开关
-# OPENROUTER_REASONING_ENABLED=true
-```
+`config/wasabi.local.json` 中每个模型声明 `sdk`、`baseURL`、`apiKeyEnv`、`modelName`、`concurrency` 和 `timeoutMs`，并在 `selection` 中选择 `primary`、可选的 `fallback`，以及 glossary 默认模型和俄/日专用模型。可参考 [config/wasabi.example.json](./config/wasabi.example.json)。
 
 默认行为：
 
 - 默认源语言：`English`
 - 默认目标语言：`Chinese (Simplified)`
-- 默认主 provider：`qwen`
-- 默认 fallback provider：`openrouter`
+- 未创建 `config/wasabi.local.json` 时，程序会在发起模型请求前报错并提示复制模板
 
 PDF 模式可选配置：
 

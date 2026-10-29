@@ -63,45 +63,33 @@ npm install
 
 ## Configuration
 
-Create a `.env` file in the project root.
+Model registration and selection live in `config/wasabi.local.json`; API keys live in `.env`.
 
-You can start from [.env_example](/f:/wasabi/wasabi_fork/wasabi_epub/.env_example:1).
+Start from the template:
 
-Minimal example:
+```bash
+cp config/wasabi.example.json config/wasabi.local.json
+```
+
+Keep only keys and machine-local settings in `.env` (each key name must match the model's `apiKeyEnv`):
 
 ```env
-PRIMARY_PROVIDER=qwen
-PRIMARY_MODEL=qwen-plus
-
-FALLBACK_ON_CONTENT_POLICY=true
-FALLBACK_PROVIDER=openrouter
-FALLBACK_MODEL=x-ai/grok-4.3
-
 QWEN_API_KEY=your_qwen_api_key
 OPENROUTER_API_KEY=your_openrouter_api_key
+
+# Optional:
+# GEMINI_API_KEY=your_gemini_api_key
+# MIMO_API_KEY=your_mimo_api_key
+# WASABI_CONFIG=config/wasabi.local.json
 ```
 
-For other providers, you can also configure:
-
-```env
-GEMINI_API_KEY=your_gemini_api_key
-MIMO_API_KEY=your_mimo_api_key
-
-# Optional: override default base URLs
-# QWEN_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
-# MIMO_BASE_URL=https://api.xiaomimimo.com/v1
-# OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
-
-# Optional: toggle OpenRouter reasoning
-# OPENROUTER_REASONING_ENABLED=true
-```
+Each model in `config/wasabi.local.json` declares `sdk`, `baseURL`, `apiKeyEnv`, `modelName`, `concurrency`, and `timeoutMs`. The `selection` block chooses `primary`, an optional `fallback`, the default glossary model, and Russian/Japanese glossary models. See [config/wasabi.example.json](./config/wasabi.example.json).
 
 Default behavior:
 
 - Default source language: `English`
 - Default target language: `Chinese (Simplified)`
-- Default primary provider: `qwen`
-- Default fallback provider: `openrouter`
+- If `config/wasabi.local.json` is missing, the CLI fails before any model request and prints the copy instructions
 
 Optional PDF setting:
 

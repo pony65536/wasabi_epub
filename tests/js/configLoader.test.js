@@ -289,6 +289,25 @@ test("loads from a file and honours WASABI_CONFIG", (t) => {
     assert.equal(custom.configPath, customPath);
 });
 
+test("repository example config passes validation", () => {
+    const runtime = loadRuntimeConfig({
+        projectRoot: process.cwd(),
+        configPath: "config/wasabi.example.json",
+        env: {
+            QWEN_API_KEY: "qwen",
+            MIMO_API_KEY: "mimo",
+            OPENROUTER_API_KEY: "openrouter",
+            GEMINI_API_KEY: "gemini",
+        },
+    });
+
+    assert.equal(runtime.models.primary.id, "qwen-plus");
+    assert.equal(runtime.models.fallback.id, "grok-fallback");
+    assert.equal(runtime.models.glossaryDefault.id, "qwen-plus");
+    assert.equal(runtime.models.glossaryBySourceLanguage.Russian, "ru-glossary");
+    assert.equal(runtime.models.glossaryBySourceLanguage.Japanese, "ja-glossary");
+});
+
 test("missing config file includes a copy hint", (t) => {
     const projectRoot = fs.mkdtempSync(
         path.join(os.tmpdir(), "wasabi-config-missing-"),
