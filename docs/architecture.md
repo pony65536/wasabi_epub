@@ -16,11 +16,19 @@ Wasabi 是一个面向长文档与字幕场景的命令行翻译工具。它统�
 CLI / Runtime
   index.js
     ->
-Core Orchestration
-  src/core.js
+Dispatch
+  src/core.js                      # 仅保留 4 个兼容导出
     ->
-Content Pipelines
-  EPUB / HTML / PDF / Subtitle / Video
+Format Orchestrators
+  src/epub/translationJob.js
+  src/html/translationJob.js
+  src/pdf/translationJob.js
+  src/subtitle/translationJob.js
+    ->
+Shared Pipeline
+  src/pipeline/jobContext.js
+  src/pipeline/translateDocument.js
+  src/pipeline/artifactPolicy.js
     ->
 Translation Engine
   src/translation/*
@@ -33,7 +41,8 @@ External Services
   Gemini / Qwen / Mimo / OpenRouter
 
 PDF Special Path
-  src/core.js
+  src/pdf/translationJob.js
+    -> src/pdf/repair.js
     -> src/pdf/pdfBridge.js
     -> src/pdf/translate_pdf.py
     -> src/pdf/app|services|domain|infra
@@ -45,17 +54,20 @@ PDF Special Path
 .
 ├─ index.js                  # CLI 入口
 ├─ src/
-│  ├─ core.js                # 各类输入的主编排
+│  ├─ core.js                # 薄分发层，只导出四个格式入口
 │  ├─ config.js              # Provider、模型、语言与运行时配置
 │  ├─ agent.js               # EPUB 章节顺序规划
 │  ├─ utils.js               # 通用工具与 AI 调用辅助
-│  ├─ translation/           # 翻译执行引擎、队列与 provider 适配
+│  ├─ pipeline/              # 任务上下文、共享翻译内核、产物保留策略
+│  ├─ translation/           # 翻译执行引擎、队列、provider 与术语 provider
 │  ├─ content/               # 术语、标题、内容分类等增强能力
-│  ├─ support/               # 缓存、日志、环境检查、选择器解析
-│  ├─ epub/                  # EPUB TOC 同步与保存
-│  ├─ subtitle/              # SRT/视频字幕处理
-│  └─ pdf/                   # PDF 子系统（Node + Python）
+│  ├─ support/               # 缓存、日志、文件、命名、环境检查、选择器
+│  ├─ epub/                  # EPUB job、chapterMap、TOC 同步与保存
+│  ├─ html/                  # HTML job
+│  ├─ subtitle/              # 字幕 job 与 SRT/视频处理
+│  └─ pdf/                   # PDF job、repair、HTML 映射与 Python 子系统
 ├─ prompts/                  # 各模式 Prompt 模板
+├─ tests/                    # Node 单测、工作流 fixture 与 Python 测试
 ├─ input/                    # 输入文件归档目录
 ├─ output/                   # 最终输出目录
 ├─ log/                      # 调试日志目录
@@ -65,7 +77,8 @@ PDF Special Path
 ## 4. 核心设计原则
 
 - 单入口，多工作流：所有模式统一从 `index.js` 进入，再按扩展名分派。
-- 编排与实现分离：`src/core.js` 负责流程控制，具体解析/保存/字幕/PDF 能力下沉到子模块。
+- 薄分发 + 格式编排：`src/core.js` 只做兼容导出；每种格式的生命周期放在各自的 `translationJob.js`。
+- 共享边界显式化：目录/日志/provider/队列/缓存的初始化集中在 `pipeline/jobContext.js`，翻译主循环集中在 `pipeline/translateDocument.js`。
 - Provider 抽象统一：不同模型供应商通过统一 `callAI` 接口接入。
 - 中间表示驱动：HTML、PDF、字幕都尽量转换为可翻译的中间结构后再走统一翻译引擎。
 - 缓存优先：章节、术语表、翻译计划、PDF 提取结果都可复用，支持断点续跑。
@@ -93,22 +106,27 @@ PDF Special Path
 - 输出 `doctor` 报告
 - 统一格式化环境错误信息
 
-### 5.3 主编排层
+### 5.3 分发与编排
 
-`src/core.js` 是系统的主调度器，暴露四类入口：
+`src/core.js` 只保留四个兼容导出，实际流程位于：
 
-- `runTranslationJob`：EPUB
-- `runHtmlTranslationJob`：HTML
-- `runPdfTranslationJob`：PDF
-- `runSubtitleTranslationJob`：SRT / 视频字幕
+- `src/epub/translationJob.js`：`runTranslationJob`
+- `src/html/translationJob.js`：`runHtmlTranslationJob`
+- `src/pdf/translationJob.js`：`runPdfTranslationJob`
+- `src/subtitle/translationJob.js`：`runSubtitleTranslationJob`
 
-它的职责包括：
+共享模块：
 
-- 建立 `input/`、`output/`、`log/`、`.cache_*`
-- 创建 logger、provider、batch queue、cache
-- 决定是否复用缓存
-- 串联术语生成、正文翻译、后处理、输出保存
-- 结束后根据 `--debug` 决定是否清理缓存和日志
+- `src/pipeline/jobContext.js`：建立 `input/`、`output/`、`log/`、`.cache_*`，创建 logger、主 provider、batch queue、cache，并统一 banner 与结束清理
+- `src/pipeline/translateDocument.js`：`document` / `perChapter` 两种缓存模式下的翻译主循环
+- `src/pipeline/artifactPolicy.js`：成功/失败、debug on/off 下的缓存与日志保留策略
+
+职责划分：
+
+- 格式 job 负责计算输出名、选择缓存模式、准备 glossary/plan/heading，并在翻译后执行格式专属的 apply/save
+- 格式 job 不再直接创建 logger、主 provider、batch queue 或 cache
+- 输入文件仅在任务成功后归档到 `input/`
+- EPUB、HTML、PDF 在初始化时创建 glossary provider；字幕延迟到语言推断后创建
 
 ## 6. 翻译引擎
 
@@ -202,10 +220,12 @@ EPUB 流程大致如下：
 
 相关模块：
 
-- `src/core.js`
+- `src/epub/translationJob.js`
+- `src/epub/chapterMap.js`
 - `src/agent.js`
 - `src/epub/tocSync.js`
 - `src/epub/epubSaver.js`
+- `src/pipeline/translateDocument.js`
 
 ### 8.2 HTML
 
@@ -219,18 +239,23 @@ HTML 是最轻量的路径：
 
 它复用了大部分通用翻译引擎，只是不需要 EPUB 的目录同步和打包。
 
+相关模块：
+
+- `src/html/translationJob.js`
+- `src/pipeline/translateDocument.js`
+
 ### 8.3 PDF
 
 PDF 是最复杂的一条链路，采用 Node + Python 双层架构。
 
 Node 侧：
 
-1. `src/core.js` 创建 cache 和输出路径
+1. `src/pdf/translationJob.js` 创建 cache 和输出路径
 2. `src/pdf/pdfBridge.js` 调用 Python CLI
 3. Python 将 PDF 提取为 JSON block 结构
 4. Node 把 JSON 转成 HTML 中间表示并复用统一翻译引擎
 5. 翻译后的 HTML 再映射回 PDF JSON
-6. 执行额外的 PDF block repair
+6. `src/pdf/repair.js` 执行额外的 PDF block repair
 7. 再调用 Python 将翻译文本回填成 PDF
 
 Python 侧分层：
@@ -262,8 +287,9 @@ SRT 流程：
 
 相关模块：
 
+- `src/subtitle/translationJob.js`
 - `src/subtitle/srt.js`
-- `src/core.js`
+- `src/pipeline/translateDocument.js`
 
 ### 8.5 视频字幕
 
@@ -278,6 +304,7 @@ SRT 流程：
 
 相关模块：
 
+- `src/subtitle/translationJob.js`
 - `src/subtitle/video.js`
 - `src/subtitle/language.js`
 
@@ -305,7 +332,14 @@ SRT 流程：
 - glossary 与 heading 相关中间数据
 - 外部进程标准输出与错误输出
 
-默认非 `--debug` 模式会自动清理日志；调试模式下保留。
+清理策略统一由 `src/pipeline/artifactPolicy.js` 决定：
+
+| 格式 | 成功、非 debug | 成功、debug | 失败、非 debug | 失败、debug |
+|---|---|---|---|---|
+| EPUB / HTML | 删除 cache/log | 保留 | 删除 cache/log | 保留 |
+| PDF / 字幕 | 删除 cache/log | 保留 | 保留 cache/log | 保留 |
+
+PDF 在失败时还会写一条说明缓存保留位置的 WARN 日志。
 
 ### 9.3 输入输出约定
 
@@ -357,7 +391,7 @@ SRT 流程：
 
 ## 13. 当前架构权衡与风险
 
-- `src/core.js` 体量较大，仍是显著的编排中心，后续继续扩展时容易膨胀
+- 四种格式仍保留各自的 orchestrator；共享的是上下文与翻译内核，apply/save 仍按格式分开
 - 翻译引擎高度依赖 prompt 与启发式，行为稳定性受模型变化影响较大
 - HTML/EPUB 的“可翻译节点判定”规则较复杂，修改时需要小心回归
 - PDF 仍然是最脆弱链路，跨语言回填、块边界恢复、字体覆盖都可能受样本影响
@@ -366,11 +400,11 @@ SRT 流程：
 
 ## 14. 建议的后续演进方向
 
-- 将 `src/core.js` 进一步拆成按输入类型分离的 orchestrator
 - 为中间表示定义更明确的数据契约，减少 HTML/JSON 来回映射的隐式假设
 - 给缓存引入更清晰的 schema version 与失效机制
-- 为 EPUB/HTML/字幕工作流补充更系统的回归样本
+- 为 EPUB/PDF 工作流补充与 HTML/字幕同等规模的无网络回归样本
 - 继续压缩 PDF Python 子系统中仍然偏大的共享模块
+- 暂不引入通用 adapter runner：字幕的 preload、PDF 的 validate、EPUB 的 TOC/NCX 仍需要明显的格式专属阶段；如果新增第五种格式再重新评估
 
 ## 15. 新开发者阅读顺序
 
@@ -378,13 +412,15 @@ SRT 流程：
 
 1. `README.md`
 2. `index.js`
-3. `src/core.js`
-4. `src/config.js`
-5. `src/translation/translator.js`
-6. `src/translation/aiProvider.js`
-7. `src/content/glossary.js`
-8. `src/subtitle/video.js`
-9. `src/pdf/README.md`
-10. `src/pdf/pdfBridge.js` 与 `src/pdf/translate_pdf.py`
+3. `src/core.js` 与 `src/pipeline/jobContext.js`
+4. `src/pipeline/translateDocument.js`
+5. 任一格式的 `translationJob.js`（建议从 `src/html/` 开始）
+6. `src/config.js`
+7. `src/translation/translator.js`
+8. `src/translation/aiProvider.js`
+9. `src/content/glossary.js`
+10. `src/subtitle/video.js`
+11. `src/pdf/README.md`
+12. `src/pdf/pdfBridge.js` 与 `src/pdf/translate_pdf.py`
 
 这样能先理解系统边界，再进入各个复杂子模块。

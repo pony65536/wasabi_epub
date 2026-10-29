@@ -283,6 +283,19 @@ Add the flag:
 --debug
 ```
 
+## Development and Testing
+
+Node.js 20.18.1+ is required.
+
+```bash
+npm ci
+npm test              # Node unit tests and workflow fixtures
+npm run lint
+npm run test:python   # Requires PyMuPDF/pikepdf; skips when fixtures are absent
+```
+
+See [docs/architecture.md](./docs/architecture.md) for the architecture and cleanup policy.
+
 ## Project Structure
 
 As a user, you typically only need to care about these directories:

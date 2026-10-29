@@ -284,6 +284,19 @@ node index.js "paper.pdf"
 --debug
 ```
 
+## 开发与测试
+
+需要 Node.js 20.18.1+。
+
+```bash
+npm ci
+npm test              # Node 单测与工作流 fixture
+npm run lint
+npm run test:python   # 需要 PyMuPDF/pikepdf；缺少 fixture 时自动跳过
+```
+
+架构与清理策略见 [docs/architecture.md](./docs/architecture.md)。
+
 ## 项目结构
 
 用户通常只需要关心这些目录：
