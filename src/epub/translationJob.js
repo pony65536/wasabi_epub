@@ -18,10 +18,8 @@ import {
     createSelectionSlug,
     getLanguageFileCode,
 } from "../support/naming.js";
-import {
-    detectEpubBookStructuralMode,
-    performTranslation,
-} from "../translation/translator.js";
+import { translateDocument } from "../pipeline/translateDocument.js";
+import { detectEpubBookStructuralMode } from "../translation/translator.js";
 import {
     collectDefinedClasses,
     collectReferencedIds,
@@ -177,31 +175,31 @@ export const runTranslationJob = async ({
             );
         }
 
-        await performTranslation(
-            selectedChapters,
+        await translateDocument({
+            chapters: selectedChapters,
             chapterMap,
             glossary,
+            cache,
+            cacheMode: "perChapter",
             runtimeConfig,
             aiProvider,
             batchQueue,
             logger,
-            cache,
+            debugMode,
             referencedIds,
             definedClasses,
-            "epub",
-            debugMode,
-            epubStructuralMode,
-        );
-
-        await batchQueue.drainQueue();
-
-        await standardizeHeadingsByRules(
-            selectedChapterMap,
-            headingFormatRules,
-            aiProvider,
-            batchQueue,
-            logger,
-        );
+            mode: "epub",
+            translationOptions: epubStructuralMode,
+            postTranslate: async () => {
+                await standardizeHeadingsByRules(
+                    selectedChapterMap,
+                    headingFormatRules,
+                    aiProvider,
+                    batchQueue,
+                    logger,
+                );
+            },
+        });
 
         await synchronizeTocHtml(chapterMap, plan.tocId);
         ({ ncxEntry, ncxContent } = await synchronizeNcx(chapterMap, zipEntries));

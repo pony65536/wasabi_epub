@@ -13,7 +13,7 @@ import {
     createSelectionSlug,
     getLanguageFileCode,
 } from "../support/naming.js";
-import { performTranslation } from "../translation/translator.js";
+import { translateDocument } from "../pipeline/translateDocument.js";
 import {
     extractPdfToJson,
     fillPdfFromJson,
@@ -153,27 +153,23 @@ export const runPdfTranslationJob = async ({
             cache.saveGlossary(glossary);
         }
 
-        const cachedHtml = cache.load("document");
-        if (cachedHtml) {
-            console.log(`\n📑 Found cached translated PDF HTML, reusing it.`);
-            chapterMap.get("document").html = cachedHtml;
-        } else {
-            await performTranslation(
-                chapters,
-                chapterMap,
-                glossary,
-                runtimeConfig,
-                aiProvider,
-                batchQueue,
-                logger,
-                cache,
-                referencedIds,
-                definedClasses,
-                "pdf",
-                debugMode,
-            );
-            await batchQueue.drainQueue();
-        }
+        await translateDocument({
+            chapters,
+            chapterMap,
+            glossary,
+            cache,
+            cacheMode: "document",
+            cacheKey: "document",
+            cachedMessage: "PDF HTML",
+            runtimeConfig,
+            aiProvider,
+            batchQueue,
+            logger,
+            debugMode,
+            referencedIds,
+            definedClasses,
+            mode: "pdf",
+        });
 
         const translatedHtml = chapterMap.get("document").html;
         const outputHtmlPath = debugHtmlPath;

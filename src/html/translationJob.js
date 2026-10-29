@@ -17,10 +17,8 @@ import {
     saveHtmlDocument,
 } from "../support/files.js";
 import { getLanguageFileCode } from "../support/naming.js";
-import {
-    collectVisibleTextNodes,
-    performTranslation,
-} from "../translation/translator.js";
+import { translateDocument } from "../pipeline/translateDocument.js";
+import { collectVisibleTextNodes } from "../translation/translator.js";
 import { extractFirstHeading, loadHtml } from "../utils.js";
 
 const createSingleHtmlChapterMap = (inputPath) => {
@@ -129,35 +127,32 @@ export const runHtmlTranslationJob = async ({
             cache.saveGlossary(glossary);
         }
 
-        const cachedHtml = cache.load("document");
-        if (cachedHtml) {
-            console.log(`\n📑 Found cached translated HTML, reusing it.`);
-            chapterMap.get("document").html = cachedHtml;
-        } else {
-            await performTranslation(
-                chapters,
-                chapterMap,
-                glossary,
-                runtimeConfig,
-                aiProvider,
-                batchQueue,
-                logger,
-                cache,
-                referencedIds,
-                definedClasses,
-                "html",
-                debugMode,
-            );
-            await batchQueue.drainQueue();
-        }
-
-        await standardizeHeadingsByRules(
+        await translateDocument({
+            chapters,
             chapterMap,
-            headingFormatRules,
+            glossary,
+            cache,
+            cacheMode: "document",
+            cacheKey: "document",
+            cachedMessage: "HTML",
+            runtimeConfig,
             aiProvider,
             batchQueue,
             logger,
-        );
+            debugMode,
+            referencedIds,
+            definedClasses,
+            mode: "html",
+            postTranslate: async () => {
+                await standardizeHeadingsByRules(
+                    chapterMap,
+                    headingFormatRules,
+                    aiProvider,
+                    batchQueue,
+                    logger,
+                );
+            },
+        });
 
         await saveHtmlDocument(
             outputPath,

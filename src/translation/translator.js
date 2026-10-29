@@ -1393,13 +1393,20 @@ export const performTranslation = async (
             : "\n✍️ Step 4: Translating Book Content...",
     );
     let skipped = 0;
+    let translated = 0;
+    let failed = 0;
+    const failedIds = [];
+    let tocCount = 0;
     const total = sortedChapters.length;
 
     // 过滤掉已缓存和 TOC，剩余章节同时入队
     const pending = [];
     for (let i = 0; i < total; i++) {
         const ch = sortedChapters[i];
-        if (ch.isTOC) continue;
+        if (ch.isTOC) {
+            tocCount++;
+            continue;
+        }
 
         const cached = cache.load(ch.id);
         if (cached) {
@@ -1433,6 +1440,7 @@ export const performTranslation = async (
         // 每章独立 then：完成后立即写 cache，不等其他章节
         return translationPromise
             .then((translatedHtml) => {
+                translated++;
                 if (chapterMap.has(ch.id)) {
                     chapterMap.get(ch.id).html = translatedHtml;
                     cache.save(ch.id, translatedHtml);
@@ -1442,6 +1450,8 @@ export const performTranslation = async (
                 }
             })
             .catch((e) => {
+                failed++;
+                failedIds.push(ch.id);
                 logger.write(
                     "ERROR",
                     `Chapter "${ch.title}" Translation Failed: ${e.stack || e.message}`,
@@ -1455,4 +1465,12 @@ export const performTranslation = async (
     if (skipped > 0) {
         console.log(`  ℹ️  ${skipped} chapter(s) restored from cache.`);
     }
+
+    return {
+        total: total - tocCount,
+        skipped,
+        translated,
+        failed,
+        failedIds,
+    };
 };

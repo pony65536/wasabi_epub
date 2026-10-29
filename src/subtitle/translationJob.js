@@ -9,7 +9,7 @@ import {
 } from "../pipeline/jobContext.js";
 import { moveFileIfNeeded } from "../support/files.js";
 import { getLanguageFileCode } from "../support/naming.js";
-import { performTranslation } from "../translation/translator.js";
+import { translateDocument } from "../pipeline/translateDocument.js";
 import {
     applyTranslatedHtmlToSubtitleJson,
     buildSubtitleJson,
@@ -201,28 +201,24 @@ export const runSubtitleTranslationJob = async ({
             cache.saveGlossary(glossary);
         }
 
-        const cachedHtml = cache.load("document");
-        if (cachedHtml) {
-            console.log(`\n📑 Found cached translated subtitle HTML, reusing it.`);
-            chapterMap.get("document").html = cachedHtml;
-        } else {
-            console.log("\n✍️ Step 5: Translating subtitle content...");
-            await performTranslation(
-                chapters,
-                chapterMap,
-                glossary,
-                runtimeConfig,
-                aiProvider,
-                batchQueue,
-                logger,
-                cache,
-                referencedIds,
-                definedClasses,
-                "subtitle",
-                debugMode,
-            );
-            await batchQueue.drainQueue();
-        }
+        await translateDocument({
+            chapters,
+            chapterMap,
+            glossary,
+            cache,
+            cacheMode: "document",
+            cacheKey: "document",
+            cachedMessage: "subtitle HTML",
+            translationMessage: "\n✍️ Step 5: Translating subtitle content...",
+            runtimeConfig,
+            aiProvider,
+            batchQueue,
+            logger,
+            debugMode,
+            referencedIds,
+            definedClasses,
+            mode: "subtitle",
+        });
 
         console.log("\n🧱 Step 6: Writing translated subtitle artifacts...");
         const translatedSubtitleJson = applyTranslatedHtmlToSubtitleJson(
