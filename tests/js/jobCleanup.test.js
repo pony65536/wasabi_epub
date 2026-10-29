@@ -1,53 +1,21 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 
 import {
     runHtmlTranslationJob,
     runSubtitleTranslationJob,
 } from "../../src/core.js";
-import { createRuntimeConfig } from "../../src/config.js";
-
-const makeRuntimeConfig = () => {
-    const runtimeConfig = createRuntimeConfig();
-    for (const provider of ["gemini", "qwen", "mimo", "openrouter"]) {
-        runtimeConfig[provider].apiKey = "test-key";
-    }
-    return runtimeConfig;
-};
-
-const makeProjectRoot = () =>
-    fs.mkdtempSync(path.join(os.tmpdir(), "wasabi-core-"));
-
-const writeFile = (filePath, content) => {
-    fs.mkdirSync(path.dirname(filePath), { recursive: true });
-    fs.writeFileSync(filePath, content, "utf8");
-};
-
-const captureStdout = async (fn) => {
-    const lines = [];
-    const original = console.log;
-    console.log = (...args) => {
-        lines.push(args.map(String).join(" "));
-    };
-
-    let value;
-    let error;
-    try {
-        value = await fn();
-    } catch (caught) {
-        error = caught;
-    } finally {
-        console.log = original;
-    }
-
-    return { value, error, lines };
-};
+import {
+    captureStdout,
+    makeRuntimeConfig,
+    makeTempProject,
+    writeFile,
+} from "./testUtils.js";
 
 test("HTML job removes cache and log after success", async (t) => {
-    const projectRoot = makeProjectRoot();
+    const projectRoot = makeTempProject();
     t.after(() => fs.rmSync(projectRoot, { recursive: true, force: true }));
     const inputPath = path.join(projectRoot, "source", "doc.html");
     writeFile(inputPath, "<html><body><p>Hello</p></body></html>");
@@ -95,7 +63,7 @@ test("HTML job removes cache and log after success", async (t) => {
 });
 
 test("HTML job surfaces the original error and removes artifacts on failure", async (t) => {
-    const projectRoot = makeProjectRoot();
+    const projectRoot = makeTempProject();
     t.after(() => fs.rmSync(projectRoot, { recursive: true, force: true }));
     const inputPath = path.join(projectRoot, "source", "doc.html");
     writeFile(inputPath, "<html><body><p>Hello</p></body></html>");
@@ -123,7 +91,7 @@ test("HTML job surfaces the original error and removes artifacts on failure", as
 });
 
 test("Subtitle job retains cache and log after failure", async (t) => {
-    const projectRoot = makeProjectRoot();
+    const projectRoot = makeTempProject();
     t.after(() => fs.rmSync(projectRoot, { recursive: true, force: true }));
     const inputPath = path.join(projectRoot, "source", "doc.srt");
     writeFile(

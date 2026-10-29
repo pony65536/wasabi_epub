@@ -13,3 +13,5 @@ tests/.tmp/
 __pycache__
 *.py[cod]
 *.pyc.*
+!tests/fixtures/
+!tests/fixtures/**
