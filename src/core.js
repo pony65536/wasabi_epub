@@ -1,5 +1,4 @@
 import AdmZip from "adm-zip";
-import * as cheerio from "cheerio";
 import fs from "fs";
 import path from "path";
 import {
@@ -43,6 +42,12 @@ import {
     logPdfDoclingSummary,
     repairPdfMergedTranslationRuns,
 } from "./pdf/repair.js";
+import {
+    collectDefinedClasses,
+    collectReferencedIds,
+    createChapterMap,
+    sanitizeCachedPlan,
+} from "./epub/chapterMap.js";
 import { synchronizeTocHtml, synchronizeNcx } from "./epub/tocSync.js";
 import { saveEpub } from "./epub/epubSaver.js";
 import {
@@ -59,31 +64,6 @@ const countCachedChapters = (cache, chapters) =>
         (count, chapter) => count + (cache.load(chapter.id) ? 1 : 0),
         0,
     );
-
-const collectReferencedIds = (chapterMap) => {
-    const referencedIds = new Set();
-    for (const chapter of chapterMap.values()) {
-        const $ = loadHtml(chapter.html);
-        $("a[href]").each((_, el) => {
-            const hash = $(el).attr("href")?.split("#")[1];
-            if (hash) referencedIds.add(hash);
-        });
-    }
-    return referencedIds;
-};
-
-const collectDefinedClasses = (zipEntries) => {
-    const definedClasses = new Set();
-    const cssEntries = zipEntries.filter((entry) =>
-        entry.entryName.endsWith(".css"),
-    );
-    for (const entry of cssEntries) {
-        const css = entry.getData().toString("utf8");
-        const matches = css.matchAll(/\.([a-zA-Z][\w-]*)/g);
-        for (const match of matches) definedClasses.add(match[1]);
-    }
-    return definedClasses;
-};
 
 const hasUsableProviderConfig = (providerName, config) => {
     const providerConfig = config?.[providerName];
@@ -130,46 +110,6 @@ const createGlossaryProvider = (logger, runtimeConfig) => {
     return createAIProvider(glossaryProviderName, glossaryConfig, logger);
 };
 
-const createChapterMap = (zipEntries) => {
-    const chapterMap = new Map();
-    const opfEntry = zipEntries.find((entry) => entry.entryName.endsWith(".opf"));
-    if (!opfEntry) {
-        throw new Error("OPF file not found in EPUB.");
-    }
-
-    const opfBasePath = opfEntry.entryName.replace(/[^/]+$/, "");
-    const $opf = cheerio.load(opfEntry.getData().toString("utf8"), {
-        xmlMode: true,
-    });
-
-    $opf("[media-type='application/xhtml+xml']").each((_, el) => {
-        const item = {
-            id: $opf(el).attr("id"),
-            href: $opf(el).attr("href"),
-            mediaType: $opf(el).attr("media-type"),
-        };
-        if (item.mediaType !== "application/xhtml+xml") return;
-
-        const fullHref = opfBasePath + item.href;
-        const zipEntry = zipEntries.find(
-            (entry) => decodeURIComponent(entry.entryName) === fullHref,
-        );
-        const html = zipEntry ? zipEntry.getData().toString("utf8") : "";
-        const chapter = {
-            ...item,
-            html,
-            entryName: zipEntry?.entryName,
-            title: extractFirstHeading(html) || item.id || "Untitled",
-        };
-
-        if (chapter.entryName) {
-            chapterMap.set(chapter.id, chapter);
-        }
-    });
-
-    return chapterMap;
-};
-
 const createSingleHtmlChapterMap = (inputPath) => {
     const html = fs.readFileSync(inputPath, "utf8");
     const chapter = {
@@ -204,34 +144,6 @@ const createHtmlGlossarySourceMap = (chapterMap) => {
     }
 
     return glossarySourceMap;
-};
-
-const sanitizeCachedPlan = (plan, chapterMap, logger) => {
-    if (!plan || !Array.isArray(plan.sorted)) return null;
-
-    let droppedCount = 0;
-    const seenIds = new Set();
-    const sorted = plan.sorted.filter((chapter) => {
-        const id = chapter?.id;
-        if (!id || !chapterMap.has(id) || seenIds.has(id)) {
-            droppedCount += 1;
-            return false;
-        }
-        seenIds.add(id);
-        return true;
-    });
-
-    if (droppedCount > 0) {
-        logger.write(
-            "WARN",
-            `Dropped ${droppedCount} invalid cached chapters from translation plan.`,
-        );
-    }
-
-    return {
-        ...plan,
-        sorted,
-    };
 };
 
 const VIDEO_INPUT_EXTENSIONS = new Set([".mkv", ".mp4", ".mov", ".m4v", ".webm"]);
