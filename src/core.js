@@ -629,7 +629,7 @@ export const runTranslationJob = async ({
     }
     console.log(`========================================\n`);
 
-    let completed = false;
+    let shouldKeepArtifacts = debugMode;
 
     try {
         const zip = new AdmZip(inputPath);
@@ -776,7 +776,6 @@ export const runTranslationJob = async ({
         console.log(`\n✅ All done! Output: ${path.basename(outputPath)}`);
         return { outputPath, cacheDir, logFile: logger.logFile };
     } catch (error) {
-        shouldKeepArtifacts = debugMode;
         logger.write(
             "ERROR",
             `Main Process Fatal Error: ${error.stack || error.message}`,
@@ -841,7 +840,7 @@ export const runHtmlTranslationJob = async ({
     }
     console.log(`========================================\n`);
 
-    let completed = false;
+    let shouldKeepArtifacts = debugMode;
 
     try {
         const chapterMap = createSingleHtmlChapterMap(inputPath);
@@ -924,7 +923,6 @@ export const runHtmlTranslationJob = async ({
         console.log(`\n✅ All done! Output: ${path.basename(outputPath)}`);
         return { outputPath, cacheDir, logFile: logger.logFile };
     } catch (error) {
-        shouldKeepArtifacts = debugMode;
         logger.write(
             "ERROR",
             `Main Process Fatal Error: ${error.stack || error.message}`,
