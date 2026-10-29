@@ -3,6 +3,12 @@ node_modules
 *.html
 *.pdf
 .env
+.env.*
+.env~
+..env*
+*env*.un~
+!.env_example
+config/wasabi.local.json
 log
 .cache*
 input
