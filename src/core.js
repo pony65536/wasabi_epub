@@ -15,6 +15,10 @@ import { createLogger } from "./support/logger.js";
 import { createAIProvider } from "./translation/aiProvider.js";
 import { createProgressCache } from "./support/cache.js";
 import { selectChaptersBySpec } from "./support/chapterSelection.js";
+import {
+    createSelectionSlug,
+    getLanguageFileCode,
+} from "./support/naming.js";
 import { callAIWithRetry, extractFirstHeading, loadHtml } from "./utils.js";
 import { createBatchQueue } from "./translation/batchQueue.js";
 import { planTranslationOrder } from "./agent.js";
@@ -39,31 +43,6 @@ import {
 import { applyTranslatedHtmlToPdfJson, pdfJsonToHtml } from "./pdf/pdfHtml.js";
 import { applyTranslatedHtmlToSubtitleJson, buildSubtitleJson, parseSrt, serializeSrt, subtitleJsonToHtml } from "./subtitle/srt.js";
 import { convertExternalSubtitleToSrt, detectExternalSubtitleFiles, extractSubtitleStreamToSrt, inferSubtitleLanguageFromFile, muxTranslatedSubtitleIntoVideo, probeSubtitleStreams, selectSubtitleStream, assertSubtitleCodecSupported } from "./subtitle/video.js";
-
-const sanitizeFileToken = (value) =>
-    value.replace(/['"]/g, "").replace(/[<>:"/\\|?*\s]+/g, "_");
-
-const createSelectionSlug = (selection) => {
-    if (!selection) return "";
-    const sanitized = sanitizeFileToken(selection).replace(/_+/g, "_").trim();
-    return sanitized.slice(0, 60) || "selected";
-};
-
-const getLanguageFileCode = (languageName) => {
-    const fileCodes = {
-        English: "en",
-        Spanish: "es",
-        French: "fr",
-        Russian: "ru",
-        "Chinese (Simplified)": "zh",
-        Korean: "ko",
-        Japanese: "ja",
-    };
-    return (
-        fileCodes[languageName] ||
-        sanitizeFileToken(languageName.toLowerCase()).replace(/_+/g, "_")
-    );
-};
 
 const countCachedChapters = (cache, chapters) =>
     chapters.reduce(
