@@ -1,14 +1,9 @@
 import path from "path";
 
-import {
-    CURRENT_PROVIDER,
-    FALLBACK_PROVIDER,
-    FALLBACK_ON_CONTENT_POLICY,
-} from "../config.js";
 import { createProgressCache } from "../support/cache.js";
 import { ensureDir } from "../support/files.js";
 import { createLogger } from "../support/logger.js";
-import { createAIProvider } from "../translation/aiProvider.js";
+import { createResolvedAIProvider } from "../translation/aiProvider.js";
 import { createBatchQueue } from "../translation/batchQueue.js";
 import { createGlossaryProvider } from "../translation/glossaryProvider.js";
 import { shouldRetainArtifacts } from "./artifactPolicy.js";
@@ -29,19 +24,25 @@ export const createJobContext = ({
     ensureDir(outputDir);
 
     const logger = createLogger(logDir);
-    const aiProvider = createAIProvider(
-        CURRENT_PROVIDER,
-        runtimeConfig,
+    const aiProvider = createResolvedAIProvider({
+        primaryModel: runtimeConfig.models.primary,
+        fallbackModel: runtimeConfig.models.fallback,
+        onContentPolicy: Boolean(runtimeConfig.models.fallback),
         logger,
-        FALLBACK_PROVIDER,
-        FALLBACK_ON_CONTENT_POLICY,
-    );
+    });
     const batchQueue = createBatchQueue(aiProvider, logger);
     const cache = createProgressCache(cacheDir);
 
+    const buildGlossaryProvider = () =>
+        createGlossaryProvider({
+            logger,
+            runtimeConfig,
+            primaryProvider: aiProvider,
+        });
+
     let glossaryProvider = deferGlossaryProvider
         ? null
-        : createGlossaryProvider(logger, runtimeConfig);
+        : buildGlossaryProvider();
 
     return {
         projectRoot,
@@ -61,7 +62,7 @@ export const createJobContext = ({
         },
         getGlossaryProvider: () => {
             if (!glossaryProvider) {
-                glossaryProvider = createGlossaryProvider(logger, runtimeConfig);
+                glossaryProvider = buildGlossaryProvider();
             }
             return glossaryProvider;
         },
@@ -91,10 +92,11 @@ export const printJobBanner = (
     console.log(`🐞 Debug: ${debugMode ? "on" : "off"}`);
     console.log(`🗣️ Source: ${runtimeConfig.sourceLanguage}`);
     console.log(`🌐 Target: ${runtimeConfig.targetLanguage}`);
-    if (runtimeConfig[CURRENT_PROVIDER]?.concurrency) {
-        console.log(
-            `⚙️ Concurrency: ${runtimeConfig[CURRENT_PROVIDER].concurrency}`,
-        );
+    const concurrency =
+        runtimeConfig.concurrencyOverride ??
+        runtimeConfig.models.primary.concurrency;
+    if (concurrency) {
+        console.log(`⚙️ Concurrency: ${concurrency}`);
     }
     if (pageSelector) {
         console.log(`📄 Pages: ${pageSelector}`);

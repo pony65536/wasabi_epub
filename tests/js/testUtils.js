@@ -2,15 +2,47 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { createRuntimeConfig } from "../../src/config.js";
+import { loadRuntimeConfig } from "../../src/config.js";
 
-export const makeRuntimeConfig = () => {
-    const runtimeConfig = createRuntimeConfig();
-    for (const provider of ["gemini", "qwen", "mimo", "openrouter"]) {
-        runtimeConfig[provider].apiKey = "test-key";
-    }
-    return runtimeConfig;
-};
+const makeTestConfig = () => ({
+    version: 1,
+    models: {
+        "test-primary": {
+            sdk: "openai",
+            baseURL: "https://example.invalid/v1",
+            apiKeyEnv: "TEST_PRIMARY_API_KEY",
+            modelName: "test-primary",
+        },
+        "test-fallback": {
+            sdk: "openai",
+            baseURL: "https://example.invalid/v1",
+            apiKeyEnv: "TEST_FALLBACK_API_KEY",
+            modelName: "test-fallback",
+        },
+        "test-glossary": {
+            sdk: "openai",
+            baseURL: "https://example.invalid/v1",
+            apiKeyEnv: "TEST_GLOSSARY_API_KEY",
+            modelName: "test-glossary",
+        },
+    },
+    selection: {
+        primary: "test-primary",
+        fallback: { model: "test-fallback" },
+        glossary: { default: "test-primary" },
+    },
+});
+
+export const makeRuntimeConfig = (overrides = {}) =>
+    loadRuntimeConfig({
+        config: makeTestConfig(),
+        env: {
+            TEST_PRIMARY_API_KEY: "test-key",
+            TEST_FALLBACK_API_KEY: "test-key",
+            TEST_GLOSSARY_API_KEY: "test-key",
+        },
+        ...overrides,
+    });
 
 export const makeTempProject = () =>
     fs.mkdtempSync(path.join(os.tmpdir(), "wasabi-core-"));

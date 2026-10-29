@@ -1,7 +1,6 @@
 import { spawn } from "child_process";
 import fs from "fs";
 import path from "path";
-import { CURRENT_PROVIDER } from "../config.js";
 
 const MINIMUM_PYTHON_VERSION = {
     major: 3,
@@ -19,12 +18,7 @@ const PYTHON_CANDIDATES = () => {
     ];
 };
 
-const TRANSLATION_ENV_CHECKS = [
-    { label: "Gemini API Key", envVar: "GEMINI_API_KEY" },
-    { label: "Qwen API Key", envVar: "QWEN_API_KEY" },
-    { label: "Mimo API Key", envVar: "MIMO_API_KEY" },
-    { label: "OpenRouter API Key", envVar: "OPENROUTER_API_KEY" },
-];
+
 
 const PYTHON_MODULE_CHECKS = [
     {
@@ -285,18 +279,45 @@ const checkExternalCommand = async (command, args = ["-version"]) => {
 };
 
 export const getTranslationEnvReport = (runtimeConfig) => {
-    const checks = TRANSLATION_ENV_CHECKS.map((check) => ({
-        ...check,
-        ok: Boolean(process.env[check.envVar]),
-        relevant:
-            check.envVar === `${String(CURRENT_PROVIDER).toUpperCase()}_API_KEY`,
-    }));
+    const checks = [];
+    const models = runtimeConfig.models;
+
+    const addRequired = (label, model) => {
+        checks.push({
+            label,
+            envVar: model.apiKeyEnv,
+            ok: Boolean(model.apiKey),
+            required: true,
+        });
+    };
+
+    addRequired(`Primary: ${models.primary.id}`, models.primary);
+    if (models.fallback) {
+        addRequired(`Fallback: ${models.fallback.id}`, models.fallback);
+    }
+    if (models.glossaryDefault.id !== models.primary.id) {
+        addRequired(
+            `Glossary: ${models.glossaryDefault.id}`,
+            models.glossaryDefault,
+        );
+    }
+    for (const language of ["Russian", "Japanese"]) {
+        const modelId = models.glossaryBySourceLanguage[language];
+        if (!modelId) continue;
+        const resolution = runtimeConfig.resolveOptionalModel(modelId);
+        checks.push({
+            label: `Glossary ${language}: ${modelId}`,
+            envVar: null,
+            ok: Boolean(resolution.model),
+            required: false,
+        });
+    }
 
     return {
         checks,
-        primaryProviderReady: checks.some(
-            (check) => check.relevant && check.ok,
-        ),
+        primaryProviderReady: checks
+            .filter((check) => check.required)
+            .every((check) => check.ok),
     };
 };
 
@@ -413,10 +434,12 @@ export const runDoctor = async (runtimeConfig) => {
 
     printSection("Translation");
     for (const check of translationReport.checks) {
-        console.log(`${check.label.padEnd(18)} ${formatStatus(check.ok)}`);
-    }
-    if (!translationReport.primaryProviderReady) {
-        allRequiredReady = false;
+        console.log(
+            `${check.label.padEnd(18)} ${formatStatus(check.ok, !check.required)}`,
+        );
+        if (check.required && !check.ok) {
+            allRequiredReady = false;
+        }
     }
     console.log("");
 
@@ -440,10 +463,12 @@ export const getPreflightReport = async (inputExt, runtimeConfig) => {
         videoReport: null,
     };
 
-    if (!translationReport.primaryProviderReady) {
-        report.missing.push(
-            "Translation provider API key for the selected configuration",
-        );
+    for (const check of translationReport.checks) {
+        if (check.required && !check.ok) {
+            report.missing.push(
+                `API key for ${check.label} (${check.envVar})`,
+            );
+        }
     }
 
     if (inputExt === ".pdf") {

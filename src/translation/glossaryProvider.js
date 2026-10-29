@@ -1,55 +1,40 @@
-import {
-    CURRENT_PROVIDER,
-    FALLBACK_PROVIDER,
-    FALLBACK_ON_CONTENT_POLICY,
-    JAPANESE_GLOSSARY_MODEL,
-    JAPANESE_GLOSSARY_PROVIDER,
-    RUSSIAN_GLOSSARY_MODEL,
-    RUSSIAN_GLOSSARY_PROVIDER,
-} from "../config.js";
-import { createAIProvider } from "./aiProvider.js";
+import { createResolvedAIProvider } from "./aiProvider.js";
 
-const hasUsableProviderConfig = (providerName, config) => {
-    const providerConfig = config?.[providerName];
-    if (!providerConfig) return false;
-    return Boolean(providerConfig.apiKey);
-};
-
-export const createGlossaryProvider = (logger, runtimeConfig) => {
-    const primaryProvider = createAIProvider(
-        CURRENT_PROVIDER,
-        runtimeConfig,
+const buildGlossaryModelProvider = ({ model, logger }) =>
+    createResolvedAIProvider({
+        primaryModel: model,
+        fallbackModel: null,
+        onContentPolicy: false,
         logger,
-        FALLBACK_PROVIDER,
-        FALLBACK_ON_CONTENT_POLICY,
-    );
+    });
 
-    let glossaryProviderName = null;
-    let glossaryModelName = null;
+export const createGlossaryProvider = ({
+    logger,
+    runtimeConfig,
+    primaryProvider,
+}) => {
+    const defaultModel = runtimeConfig.models.glossaryDefault;
+    const createDefaultProvider = () =>
+        defaultModel.id === runtimeConfig.models.primary.id
+            ? primaryProvider
+            : buildGlossaryModelProvider({ model: defaultModel, logger });
 
-    if (runtimeConfig.sourceLanguage === "Russian") {
-        glossaryProviderName = RUSSIAN_GLOSSARY_PROVIDER;
-        glossaryModelName = RUSSIAN_GLOSSARY_MODEL;
-    } else if (runtimeConfig.sourceLanguage === "Japanese") {
-        glossaryProviderName = JAPANESE_GLOSSARY_PROVIDER;
-        glossaryModelName = JAPANESE_GLOSSARY_MODEL;
+    const languageModelId =
+        runtimeConfig.models.glossaryBySourceLanguage[
+            runtimeConfig.sourceLanguage
+        ];
+    if (!languageModelId) {
+        return createDefaultProvider();
     }
 
-    if (!glossaryProviderName || !glossaryModelName) {
-        return primaryProvider;
+    const resolution = runtimeConfig.resolveOptionalModel(languageModelId);
+    if (!resolution.model) {
+        logger.write(
+            "WARN",
+            `Glossary model "${languageModelId}" is unavailable (${resolution.unavailableReason}); falling back to "${defaultModel.id}".`,
+        );
+        return createDefaultProvider();
     }
 
-    const glossaryConfig = {
-        ...runtimeConfig,
-        [glossaryProviderName]: {
-            ...runtimeConfig[glossaryProviderName],
-            modelName: glossaryModelName,
-        },
-    };
-
-    if (!hasUsableProviderConfig(glossaryProviderName, glossaryConfig)) {
-        return primaryProvider;
-    }
-
-    return createAIProvider(glossaryProviderName, glossaryConfig, logger);
+    return buildGlossaryModelProvider({ model: resolution.model, logger });
 };
