@@ -3,7 +3,7 @@ import path from "path";
 import { createProgressCache } from "../support/cache.js";
 import { ensureDir } from "../support/files.js";
 import { createLogger } from "../support/logger.js";
-import { createResolvedAIProvider } from "../translation/aiProvider.js";
+import { createAIProvider } from "../translation/aiProvider.js";
 import { createBatchQueue } from "../translation/batchQueue.js";
 import { createGlossaryProvider } from "../translation/glossaryProvider.js";
 import { shouldRetainArtifacts } from "./artifactPolicy.js";
@@ -24,7 +24,7 @@ export const createJobContext = ({
     ensureDir(outputDir);
 
     const logger = createLogger(logDir);
-    const aiProvider = createResolvedAIProvider({
+    const aiProvider = createAIProvider({
         primaryModel: runtimeConfig.models.primary,
         fallbackModel: runtimeConfig.models.fallback,
         onContentPolicy: Boolean(runtimeConfig.models.fallback),

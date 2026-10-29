@@ -1,7 +1,7 @@
-import { createResolvedAIProvider } from "./aiProvider.js";
+import { createAIProvider } from "./aiProvider.js";
 
 const buildGlossaryModelProvider = ({ model, logger }) =>
-    createResolvedAIProvider({
+    createAIProvider({
         primaryModel: model,
         fallbackModel: null,
         onContentPolicy: false,

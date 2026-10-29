@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { createResolvedAIProvider } from "../../src/translation/aiProvider.js";
+import { createAIProvider } from "../../src/translation/aiProvider.js";
 import { createGoogleGenerativeAIAdapter } from "../../src/translation/sdk/googleGenerativeAI.js";
 import { createOpenAIAdapter } from "../../src/translation/sdk/openai.js";
 
@@ -73,7 +73,7 @@ const makeSdkFactories = (calls) => ({
 
 test("OpenAI adapter maps constructor, messages, JSON mode, and options", async () => {
     const calls = [];
-    const provider = createResolvedAIProvider({
+    const provider = createAIProvider({
         primaryModel: makeModel({
             requestOptions: { reasoning: { enabled: true } },
         }),
@@ -117,7 +117,7 @@ test("OpenAI adapter rejects reserved request keys", async () => {
 
 test("Google adapter maps model and baseURL request options", async () => {
     const calls = [];
-    const provider = createResolvedAIProvider({
+    const provider = createAIProvider({
         primaryModel: makeModel({
             id: "gemini",
             sdk: "@google/generative-ai",
@@ -155,7 +155,7 @@ test("facade timeout applies to both SDK adapters", async () => {
         }),
     };
 
-    const provider = createResolvedAIProvider({
+    const provider = createAIProvider({
         primaryModel: makeModel({ timeoutMs: 20 }),
         logger: makeLogger(),
         sdkFactories,
@@ -186,7 +186,7 @@ test("falls back only on content policy errors", async () => {
         }),
     };
     const logger = makeLogger();
-    const provider = createResolvedAIProvider({
+    const provider = createAIProvider({
         primaryModel: makeModel({ id: "primary" }),
         fallbackModel: makeModel({ id: "fallback" }),
         onContentPolicy: true,
@@ -220,7 +220,7 @@ test("does not fall back on unrelated errors", async () => {
         }),
     };
 
-    const provider = createResolvedAIProvider({
+    const provider = createAIProvider({
         primaryModel: makeModel({ id: "primary" }),
         fallbackModel: makeModel({ id: "fallback" }),
         onContentPolicy: true,
@@ -254,7 +254,7 @@ test("supports cross-SDK fallback and disabled fallback", async () => {
         }),
     };
 
-    const provider = createResolvedAIProvider({
+    const provider = createAIProvider({
         primaryModel: makeModel({ id: "primary", sdk: "openai" }),
         fallbackModel: makeModel({
             id: "fallback",
@@ -266,7 +266,7 @@ test("supports cross-SDK fallback and disabled fallback", async () => {
     });
     assert.equal(await provider.callAI("user", "system"), "google-fallback");
 
-    const disabled = createResolvedAIProvider({
+    const disabled = createAIProvider({
         primaryModel: makeModel({ id: "primary" }),
         fallbackModel: makeModel({ id: "fallback" }),
         onContentPolicy: false,
@@ -281,7 +281,7 @@ test("supports cross-SDK fallback and disabled fallback", async () => {
 
 test("does not write API keys to the logger", async () => {
     const logger = makeLogger();
-    const provider = createResolvedAIProvider({
+    const provider = createAIProvider({
         primaryModel: makeModel(),
         logger,
         sdkFactories: makeSdkFactories([]),
@@ -309,7 +309,7 @@ test("deprecated model guidance points at the config model id", async () => {
         }),
     };
 
-    const provider = createResolvedAIProvider({
+    const provider = createAIProvider({
         primaryModel: makeModel({ id: "primary" }),
         logger: makeLogger(),
         sdkFactories,
