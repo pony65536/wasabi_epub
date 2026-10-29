@@ -15,10 +15,21 @@ import {
     installPdfRequirements,
     runDoctor,
 } from "./src/support/environment.js";
+import { checkConfigIgnored } from "./src/support/configSafety.js";
 import { parsePageSelector } from "./src/support/pageSelection.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+
+const warnIfConfigNotIgnored = (runtimeConfig) => {
+    const warning = checkConfigIgnored({
+        projectRoot: __dirname,
+        configPath: runtimeConfig.configPath,
+    });
+    if (warning) {
+        console.warn(`\n⚠️  ${warning}\n`);
+    }
+};
 
 const SUPPORTED_INPUT_EXTENSIONS = [
     ".epub",
@@ -379,6 +390,7 @@ const runTranslation = async (cliArgs) => {
         targetLanguage: cliArgs.targetLanguage,
         concurrency: cliArgs.concurrency,
     });
+    warnIfConfigNotIgnored(runtimeConfig);
 
     let preflightReport = await getPreflightReport(inputExt, runtimeConfig);
     if (!preflightReport.ready) {
@@ -470,12 +482,12 @@ const main = async () => {
 
     try {
         if (cliArgs.mode === "doctor") {
-            await runDoctor(
-                loadRuntimeConfig({
-                    projectRoot: __dirname,
-                    requireKeys: false,
-                }),
-            );
+            const doctorConfig = loadRuntimeConfig({
+                projectRoot: __dirname,
+                requireKeys: false,
+            });
+            warnIfConfigNotIgnored(doctorConfig);
+            await runDoctor(doctorConfig);
             return;
         }
 
