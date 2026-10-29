@@ -47,7 +47,7 @@ PDF example (source page / translated page):
 
 ## Requirements
 
-- [Node.js](https://nodejs.org/) 18+
+- [Node.js](https://nodejs.org/) 20.18.1+
 - [npm](https://www.npmjs.com/)
 - [Python](https://www.python.org/) 3.10+
 - Video subtitle workflows require `ffmpeg` and `ffprobe` in `PATH`

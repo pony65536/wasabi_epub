@@ -3,7 +3,12 @@
     "type": "module",
     "scripts": {
         "test": "node --test",
+        "test:python": "python -m unittest discover -s tests",
+        "lint": "eslint src index.js tests/js",
         "pdf:install": "node index.js setup --pdf"
+    },
+    "engines": {
+        "node": ">=20.18.1"
     },
     "dependencies": {
         "@google/generative-ai": "^0.24.1",
@@ -24,6 +29,8 @@
         "p-limit": "^7.2.0"
     },
     "devDependencies": {
+        "eslint": "^9.39.4",
+        "globals": "^17.13.0",
         "typescript": "^5.9.3"
     }
 }

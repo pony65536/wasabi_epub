@@ -47,7 +47,7 @@ PDF 示例（英文原页 / 中文输出）：
 
 ## 环境要求
 
-- [Node.js](https://nodejs.org/) 18+
+- [Node.js](https://nodejs.org/) 20.18.1+
 - [npm](https://www.npmjs.com/)
 - [Python](https://www.python.org/) 3.10+
 - 视频字幕模式需要 `ffmpeg` 和 `ffprobe` 在 `PATH` 中可用
