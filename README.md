@@ -37,9 +37,9 @@ PDF 示例（英文原页 / 中文输出）：
 ## 主要能力
 
 - 按文件类型自动选择对应工作流
-- **全书导演（Director Agent）**：翻译前智能抽样通读骨架，统一全书文风、角色人称代词（避免男女代词乱飘）与核心世界观设定（Book Bible）
-- **出版级行内排版保护（Inline Slots）**：自动对超链接、斜体、粗体、角标与脚注进行脱敏占位符编码与白名单查表还原，适应中文语序倒装且排版零损坏
-- 支持 `Gemini`、`Qwen`、`Mimo`、`OpenRouter` 及兼容 OpenAI 格式的中转站
+- 翻译前生成 Book Bible，结合 Director、记忆与术语检索保持跨章节一致性
+- 通过 Inline Slots 和结构校验保留超链接、行内格式与脚注
+- 支持 `Gemini`、`Qwen`、`Mimo`、`OpenRouter` 及 OpenAI 兼容中转站
 - 支持章节选择，仅 `EPUB`
 - 支持页码选择，仅 `PDF`
 - 支持断点续跑，重跑时优先复用缓存
@@ -49,7 +49,7 @@ PDF 示例（英文原页 / 中文输出）：
 
 ## 环境要求
 
-- [Node.js](https://nodejs.org/) 18+
+- [Node.js](https://nodejs.org/) 20.18.1+
 - [npm](https://www.npmjs.com/)
 - [Python](https://www.python.org/) 3.10+
 - 视频字幕模式需要 `ffmpeg` 和 `ffprobe` 在 `PATH` 中可用
@@ -65,45 +65,43 @@ npm install
 
 ## 配置
 
-在项目根目录创建 `.env`。
+模型登记和选型放在 `config/wasabi.local.json`，API Key 放在 `.env`。
 
-可以直接参考 [.env_example](/f:/wasabi/wasabi_fork/wasabi_epub/.env_example:1)。
+先复制模板：
 
-最小示例：
+```bash
+cp config/wasabi.example.json config/wasabi.local.json
+```
+
+在 `.env` 中只保留 Key 和本机设置（Key 名必须与模型条目里的 `apiKeyEnv` 一致）：
 
 ```env
-PRIMARY_PROVIDER=qwen
-PRIMARY_MODEL=qwen-plus
-
-FALLBACK_ON_CONTENT_POLICY=true
-FALLBACK_PROVIDER=openrouter
-FALLBACK_MODEL=x-ai/grok-4.3
-
 QWEN_API_KEY=your_qwen_api_key
 OPENROUTER_API_KEY=your_openrouter_api_key
+
+# 可选：
+# GEMINI_API_KEY=your_gemini_api_key
+# MIMO_API_KEY=your_mimo_api_key
+# WASABI_CONFIG=config/wasabi.local.json
 ```
 
-如果你使用别的 provider，也可以配置：
-
-```env
-GEMINI_API_KEY=your_gemini_api_key
-MIMO_API_KEY=your_mimo_api_key
-
-# 可选：覆盖默认 base URL（支持接入任意第三方 OpenAI 兼容格式的中转站）
-# QWEN_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
-# MIMO_BASE_URL=https://api.xiaomimimo.com/v1
-# OPENROUTER_BASE_URL=https://api.your-relay.com/v1
-
-# 可选：OpenRouter reasoning 开关（若中转站不兼容 reasoning 参数请设为 false）
-# OPENROUTER_REASONING_ENABLED=false
-```
+`config/wasabi.local.json` 中每个模型声明 `sdk`、`baseURL`、`apiKeyEnv`、`modelName`、`concurrency` 和 `timeoutMs`，并在 `selection` 中选择 `primary`、可选的 `fallback`，以及 glossary 默认模型和俄/日专用模型。可参考 [config/wasabi.example.json](./config/wasabi.example.json)。
 
 默认行为：
 
 - 默认源语言：`English`
 - 默认目标语言：`Chinese (Simplified)`
-- 默认主 provider：`qwen`
-- 默认 fallback provider：`openrouter`
+- 未创建配置且没有旧配置时，程序会在发起模型请求前报错并提示复制模板
+
+多阶段翻译继续使用统一模型网关。可以在 `selection.stages` 中为 `planner`、`translation`、`director`、`glossary`、`memory`、`critic`、`headings` 指定模型 ID；未指定的阶段使用 `primary`，术语阶段优先使用对应语言的 glossary 模型。`--model <模型ID>` 仅覆盖正文翻译阶段。
+
+`selection.stageFallback` 可为阶段指定候补模型，设为 `null` 可禁用该阶段候补；`selection.stageRequirements` 可要求候补支持 `jsonMode` 或 `reasoning`。模型条目可选 `jsonMode`、`maxOutputTokens` 和 `connection`。相同 SDK、URL 和 Key 变量的模型默认共享连接并发上限；显式 `connection` 可以命名连接组，同组模型的连接参数须一致，并发取组内最小值。`--concurrency` 同时覆盖本次任务的全局和连接并发上限。
+
+JSON 配置默认仅在内容安全错误时使用候补。需要扩大范围时，在 `selection.fallback.onErrors` 中列出 `content_policy`、`model_missing`、`auth`、`network`、`rate_limit` 或 `timeout`；`onContentPolicy: false` 始终禁用内容安全回退。SDK 不额外重试，由网关控制请求重试、超时取消和用量统计。OpenAI 兼容中转的 SSE 响应会被解析，只提取正文；空正文和截断响应不会被当作成功译文。
+
+旧配置仍可使用：显式 `WASABI_MODELS_FILE` 读取旧模型文件；否则优先读取默认 JSON 配置，缺失时兼容 `models.json` 或含 `PRIMARY_PROVIDER` / `PROVIDER` 的旧环境配置，并写入迁移提示。不要同时设置 `WASABI_CONFIG` 与 `WASABI_MODELS_FILE`。旧配置按原来的 fallback 错误类别迁移，建议逐步改用上面的 JSON 入口。
+
+缓存会核对源文件、语言、提示词、模型路由和流程版本。失败或部分完成时保留缓存与日志，续跑只重试未完成节点；只有完整成功且非 debug 才清理。归档遇到同名输入文件时追加序号，保留两份。
 
 PDF 模式可选配置：
 
@@ -147,15 +145,9 @@ node index.js "book.epub" --debug
 - `--page`：只翻译指定页码，仅 `PDF`
 - `--from`：设置源语言
 - `--to`：设置目标语言
-- `--model`：只用指定模型配置跑正文翻译（模型配置名来自 `models.json`）
+- `--model`：只覆盖正文翻译阶段使用的模型 ID
 - `--concurrency`：设置并发数，必须为正整数
 - `--debug`：保留缓存目录和日志文件，便于排错
-
-模型配置（可选）：
-
-- 默认沿用 `.env` 的 `PRIMARY_*` / `FALLBACK_*` 旧配置
-- 在项目根目录放 `models.json`（或用 `WASABI_MODELS_FILE` 指定路径）即可声明连接、模型与阶段路由：`connections` 存 URL/接口格式/密钥环境变量名，`models` 存模型名与能力（`jsonMode`/`reasoning`/`maxOutputTokens`），`routing.stages` 可为 `planner/translation/director/glossary/memory/critic/headings` 分别指定模型
-- 密钥只放在环境变量里（`tokenEnv` 指向变量名）；换模型或改推理/预算会按路由指纹使旧缓存失效
 
 环境与安装命令：
 
@@ -301,6 +293,19 @@ node index.js "paper.pdf"
 ```bash
 --debug
 ```
+
+## 开发与测试
+
+需要 Node.js 20.18.1+。
+
+```bash
+npm ci
+npm test              # Node 单测与工作流 fixture
+npm run lint
+npm run test:python   # 需要 PyMuPDF/pikepdf；缺少 fixture 时自动跳过
+```
+
+架构与清理策略见 [docs/architecture.md](./docs/architecture.md)。
 
 ## 项目结构
 

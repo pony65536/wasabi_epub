@@ -1,52 +1,35 @@
-import { GoogleGenerativeAI } from "@google/generative-ai";
-import OpenAI from "openai";
+import { createGoogleGenerativeAIAdapter } from "./sdk/googleGenerativeAI.js";
+import { createOpenAIAdapter } from "./sdk/openai.js";
 import { createRequestLimiter } from "./requestLimiter.js";
-import {
-    classifyProviderError,
-    isContentPolicyError,
-} from "../models/errors.js";
-import {
-    parseSseCompletion,
-    readCompletionContent,
-} from "../models/response.js";
+export { classifyProviderError } from "../models/errors.js";
+export { parseSseCompletion, readCompletionContent } from "../models/response.js";
 
-export { classifyProviderError, isContentPolicyError };
-export { parseSseCompletion, readCompletionContent };
+export const isContentPolicyError = (err) => {
+    const message = String(err?.message || "").toLowerCase();
+    if (!message) return false;
 
-const buildDeprecatedModelGuidance = (client, err) => {
-    const message = String(err?.message || "");
-    const normalized = message.toLowerCase();
-    const isDeprecatedModelError =
-        normalized.includes("deprecated") ||
-        normalized.includes("decommissioned") ||
-        normalized.includes("no longer available") ||
-        normalized.includes("model not found") ||
-        normalized.includes("unknown model");
+    const hasContentPolicySignal =
+        message.includes("inappropriate content") ||
+        message.includes("content policy") ||
+        message.includes("content-filter") ||
+        message.includes("content filter") ||
+        message.includes("safety policy") ||
+        message.includes("violates safety");
 
-    if (!isDeprecatedModelError) return null;
+    if (!hasContentPolicySignal) return false;
 
-    const providerLine = `Provider: ${client.providerName}`;
-    const modelLine = `Model: ${client.modelName}`;
+    const excludedSignals = [
+        "invalid json",
+        "json",
+        "timeout",
+        "timed out",
+        "rate limit",
+        "429",
+        "econnreset",
+        "socket hang up",
+    ];
 
-    if (client.providerName === "openrouter") {
-        return [
-            "Configured fallback model is no longer available.",
-            providerLine,
-            modelLine,
-            "",
-            "Update your environment config, for example:",
-            "FALLBACK_MODEL=x-ai/grok-4.3",
-            "OPENROUTER_MODEL=x-ai/grok-4.3",
-        ].join("\n");
-    }
-
-    return [
-        "Configured model is no longer available.",
-        providerLine,
-        modelLine,
-        "",
-        "Update the model name in your environment configuration.",
-    ].join("\n");
+    return !excludedSignals.some((token) => message.includes(token));
 };
 
 const withTimeout = async (promise, timeoutMs, timeoutLabel, onTimeout) => {
@@ -64,9 +47,7 @@ const withTimeout = async (promise, timeoutMs, timeoutLabel, onTimeout) => {
                         `${timeoutLabel} timed out after ${timeoutMs}ms`,
                     );
                     error.code = "ETIMEDOUT";
-                    try {
-                        onTimeout?.();
-                    } catch {}
+                    onTimeout?.();
                     reject(error);
                 }, timeoutMs);
             }),
@@ -76,118 +57,80 @@ const withTimeout = async (promise, timeoutMs, timeoutLabel, onTimeout) => {
     }
 };
 
-const buildProviderClient = (providerName, config) => {
-    const providerConfig = config[providerName];
-    if (!providerConfig) throw new Error(`Unknown provider: ${providerName}`);
-
-    let _callRaw;
-
-    if (providerName === "gemini") {
-        const genAI = new GoogleGenerativeAI(providerConfig.apiKey);
-        const model = genAI.getGenerativeModel({
-            model: providerConfig.modelName,
-        });
-        _callRaw = async (systemInstruction, userContent) => {
-            const result = await model.generateContent(
-                `${systemInstruction}\n\nUser Input:\n${userContent}`,
-            );
-            return (await result.response).text().trim();
-        };
-    } else {
-        const client = new OpenAI({
-            apiKey: providerConfig.apiKey,
-            baseURL: providerConfig.baseURL,
-            timeout: providerConfig.timeoutMs,
-        });
-        _callRaw = async (systemInstruction, userContent, forceJson, requestOptions = {}) => {
-            const { signal, ...bodyOptions } = requestOptions;
-            const options = {
-                model: providerConfig.modelName,
-                messages: [
-                    { role: "system", content: systemInstruction },
-                    { role: "user", content: userContent },
-                ],
-                ...(providerConfig.requestOptions || {}),
-                ...(forceJson && { response_format: { type: "json_object" } }),
-            };
-            // signal 必须作为请求选项传入（第二参数），不能混进请求正文
-            const completion = await client.chat.completions.create(
-                options,
-                signal ? { signal } : undefined,
-            );
-            // 兼容某些第三方中转站当传入 response_format 时强行返回 SSE string 的情况
-            if (typeof completion === "string") {
-                if (completion.includes("data:")) {
-                    const sseContent = parseSseCompletion(completion);
-                    if (sseContent) return sseContent;
-                    // 禁止把原始 SSE 协议内容当成译文写回（例如只有 reasoning 增量）
-                    const sseError = new Error(
-                        "SSE response contained no assistant content (reasoning-only or empty).",
-                    );
-                    sseError.code = "EMPTY_CONTENT";
-                    throw sseError;
-                }
-                return completion.trim();
-            }
-            return readCompletionContent(completion);
-        };
-    }
-
-    return {
-        providerName,
-        providerConfig,
-        modelName: providerConfig.modelName,
-        concurrency: providerConfig.concurrency,
-        callRaw: _callRaw,
-    };
+const DEFAULT_SDK_FACTORIES = {
+    openai: createOpenAIAdapter,
+    "@google/generative-ai": createGoogleGenerativeAIAdapter,
 };
 
-export const createAIProvider = (
-    providerName,
-    config,
+const buildResolvedModelGuidance = (model, err, isFallback) => {
+    const normalized = String(err?.message || "").toLowerCase();
+    const isDeprecatedModelError =
+        normalized.includes("deprecated") ||
+        normalized.includes("decommissioned") ||
+        normalized.includes("no longer available") ||
+        normalized.includes("model not found") ||
+        normalized.includes("unknown model");
+
+    if (!isDeprecatedModelError) return null;
+
+    const label = isFallback ? "Configured fallback model" : "Configured model";
+    return [
+        `${label} "${model.id}" (${model.modelName}) is no longer available.`,
+        `Update models.${model.id}.modelName in config/wasabi.local.json.`,
+    ].join("\n");
+};
+
+const buildResolvedClient = (model, sdkFactories) => {
+    const factory = sdkFactories[model.sdk];
+    if (!factory) {
+        throw new Error(`Unsupported SDK: ${model.sdk}`);
+    }
+    return factory(model);
+};
+
+export const createAIProvider = ({
+    primaryModel,
+    fallbackModel = null,
+    onContentPolicy = false,
     logger,
-    fallbackProviderName = null,
-    fallbackOnContentPolicy = false,
-) => {
-    const primaryClient = buildProviderClient(providerName, config);
+    sdkFactories = DEFAULT_SDK_FACTORIES,
+}) => {
+    if (!primaryModel?.apiKey) {
+        throw new Error(
+            `Missing API key for model "${primaryModel?.id ?? "unknown"}"`,
+        );
+    }
+
+    const primaryClient = buildResolvedClient(primaryModel, sdkFactories);
     const shouldEnableFallback =
-        Boolean(fallbackOnContentPolicy) &&
-        Boolean(fallbackProviderName) &&
-        fallbackProviderName !== providerName;
+        Boolean(onContentPolicy) &&
+        Boolean(fallbackModel) &&
+        fallbackModel.id !== primaryModel.id;
     const fallbackClient = shouldEnableFallback
-        ? buildProviderClient(fallbackProviderName, config)
+        ? buildResolvedClient(fallbackModel, sdkFactories)
         : null;
-    // 正文与辅助请求共用同一个限流器，避免辅助调用绕过并发上限
     const requestLimiter = createRequestLimiter(primaryClient.concurrency || 4);
 
     const callWithClient = async (
         client,
+        model,
         userContent,
         systemInstruction,
         forceJsonMode,
     ) => {
         logger.write(
             "REQUEST",
-            `PROVIDER: ${client.providerName}\nMODEL: ${client.modelName}\nTIMEOUT_MS: ${client.providerConfig.timeoutMs ?? "none"}\nSYSTEM:\n${systemInstruction}\n\nUSER:\n${userContent}`,
+            `MODEL: ${client.id}\nMODEL_NAME: ${client.modelName}\nTIMEOUT_MS: ${model.timeoutMs}\nSYSTEM:\n${systemInstruction}\n\nUSER:\n${userContent}`,
         );
         const startedAt = Date.now();
         const controller = new AbortController();
-        const responseText = await requestLimiter.run(() =>
-            withTimeout(
-                client.callRaw(
-                    systemInstruction,
-                    userContent,
-                    forceJsonMode,
-                    { signal: controller.signal },
-                ),
-                client.providerConfig.timeoutMs,
-                `${client.providerName}:${client.modelName}`,
-                () => controller.abort(),
-            ),
-        );
+        const responseText = await requestLimiter.run(() => withTimeout(
+            client.callRaw(systemInstruction, userContent, forceJsonMode, { signal: controller.signal }),
+            model.timeoutMs, `${client.id}:${client.modelName}`, () => controller.abort(),
+        ));
         logger.write(
             "RESPONSE",
-            `PROVIDER: ${client.providerName}\nMODEL: ${client.modelName}\nELAPSED_MS: ${Date.now() - startedAt}\n${responseText}`,
+            `MODEL: ${client.id}\nMODEL_NAME: ${client.modelName}\nELAPSED_MS: ${Date.now() - startedAt}\n${responseText}`,
         );
         return responseText;
     };
@@ -201,6 +144,7 @@ export const createAIProvider = (
         try {
             return await callWithClient(
                 primaryClient,
+                primaryModel,
                 userContent,
                 systemInstruction,
                 forceJsonMode,
@@ -209,19 +153,21 @@ export const createAIProvider = (
             if (fallbackClient && isContentPolicyError(e)) {
                 logger.write(
                     "WARN",
-                    `Content policy triggered on provider "${primaryClient.providerName}". Falling back to "${fallbackClient.providerName}". Original error: ${e.message}`,
+                    `Content policy triggered on model "${primaryClient.id}". Falling back to "${fallbackClient.id}". Original error: ${e.message}`,
                 );
                 try {
                     return await callWithClient(
                         fallbackClient,
+                        fallbackModel,
                         userContent,
                         systemInstruction,
                         forceJsonMode,
                     );
                 } catch (fallbackError) {
-                    const guidance = buildDeprecatedModelGuidance(
-                        fallbackClient,
+                    const guidance = buildResolvedModelGuidance(
+                        fallbackModel,
                         fallbackError,
+                        true,
                     );
                     if (guidance) {
                         fallbackError.message = `${fallbackError.message}\n\n${guidance}`;
@@ -234,14 +180,15 @@ export const createAIProvider = (
                 }
             }
 
-            const guidance = buildDeprecatedModelGuidance(primaryClient, e);
+            const guidance = buildResolvedModelGuidance(
+                primaryModel,
+                e,
+                false,
+            );
             if (guidance) {
                 e.message = `${e.message}\n\n${guidance}`;
             }
-            logger.write(
-                "ERROR",
-                `callAI Failed: ${e.stack || e.message}`,
-            );
+            logger.write("ERROR", `callAI Failed: ${e.stack || e.message}`);
             throw e;
         }
     };
@@ -249,12 +196,12 @@ export const createAIProvider = (
     return {
         callAI,
         concurrency: primaryClient.concurrency,
+        modelId: primaryClient.id,
+        providerName: primaryClient.id,
+        sdk: primaryClient.sdk,
         modelName: primaryClient.modelName,
-        providerName: primaryClient.providerName,
-        fallbackProviderName: fallbackClient?.providerName ?? null,
-        getLimiterStats: () => ({
-            active: requestLimiter.active,
-            pending: requestLimiter.pending,
-        }),
+        fallbackProviderName: fallbackClient?.id ?? null,
+        fallbackModelId: fallbackClient?.id ?? null,
+        getLimiterStats: () => ({ active: requestLimiter.active, pending: requestLimiter.pending }),
     };
 };

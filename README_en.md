@@ -47,7 +47,7 @@ PDF example (source page / translated page):
 
 ## Requirements
 
-- [Node.js](https://nodejs.org/) 18+
+- [Node.js](https://nodejs.org/) 20.18.1+
 - [npm](https://www.npmjs.com/)
 - [Python](https://www.python.org/) 3.10+
 - Video subtitle workflows require `ffmpeg` and `ffprobe` in `PATH`
@@ -63,45 +63,43 @@ npm install
 
 ## Configuration
 
-Create a `.env` file in the project root.
+Model registration and selection live in `config/wasabi.local.json`; API keys live in `.env`.
 
-You can start from [.env_example](/f:/wasabi/wasabi_fork/wasabi_epub/.env_example:1).
+Start from the template:
 
-Minimal example:
+```bash
+cp config/wasabi.example.json config/wasabi.local.json
+```
+
+Keep only keys and machine-local settings in `.env` (each key name must match the model's `apiKeyEnv`):
 
 ```env
-PRIMARY_PROVIDER=qwen
-PRIMARY_MODEL=qwen-plus
-
-FALLBACK_ON_CONTENT_POLICY=true
-FALLBACK_PROVIDER=openrouter
-FALLBACK_MODEL=x-ai/grok-4.3
-
 QWEN_API_KEY=your_qwen_api_key
 OPENROUTER_API_KEY=your_openrouter_api_key
+
+# Optional:
+# GEMINI_API_KEY=your_gemini_api_key
+# MIMO_API_KEY=your_mimo_api_key
+# WASABI_CONFIG=config/wasabi.local.json
 ```
 
-For other providers, you can also configure:
-
-```env
-GEMINI_API_KEY=your_gemini_api_key
-MIMO_API_KEY=your_mimo_api_key
-
-# Optional: override default base URLs
-# QWEN_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
-# MIMO_BASE_URL=https://api.xiaomimimo.com/v1
-# OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
-
-# Optional: toggle OpenRouter reasoning
-# OPENROUTER_REASONING_ENABLED=true
-```
+Each model in `config/wasabi.local.json` declares `sdk`, `baseURL`, `apiKeyEnv`, `modelName`, `concurrency`, and `timeoutMs`. The `selection` block chooses `primary`, an optional `fallback`, the default glossary model, and Russian/Japanese glossary models. See [config/wasabi.example.json](./config/wasabi.example.json).
 
 Default behavior:
 
 - Default source language: `English`
 - Default target language: `Chinese (Simplified)`
-- Default primary provider: `qwen`
-- Default fallback provider: `openrouter`
+- If neither a registry nor a legacy configuration is available, the CLI fails before any model request and prints the copy instructions
+
+The shared model gateway supports `selection.stages` for `planner`, `translation`, `director`, `glossary`, `memory`, `critic`, and `headings`. Stages default to `primary`; glossary selection prefers a configured language-specific model. `--model <model-id>` overrides only translation. `selection.stageFallback` selects per-stage fallbacks (`null` disables one), and `selection.stageRequirements` checks fallback capabilities (`jsonMode`, `reasoning`).
+
+Models also accept `jsonMode`, `maxOutputTokens`, and an optional `connection` group name. Models sharing SDK, URL, and API key variable share a connection limit by default. Named groups require matching connection settings and use the smallest configured concurrency in the group. `--concurrency` overrides both global and connection limits for that run.
+
+Registry fallbacks default to content-policy errors. Set `selection.fallback.onErrors` to an array of `content_policy`, `model_missing`, `auth`, `network`, `rate_limit`, or `timeout` to opt into other categories. `onContentPolicy: false` always disables content-policy fallback. The gateway owns request retries, cancellation and usage accounting; SDK retries are disabled. Relay SSE is decoded, and empty or truncated responses are rejected.
+
+Legacy configuration remains supported: explicit `WASABI_MODELS_FILE` selects a legacy file; otherwise the default JSON registry takes priority, followed by `models.json` or legacy environment settings containing `PRIMARY_PROVIDER` / `PROVIDER`. Do not set both `WASABI_CONFIG` and `WASABI_MODELS_FILE`. Legacy fallback categories are retained during adaptation, with a migration notice in the job log.
+
+Cache reuse validates task identity and chapter status. Failed or partial runs retain cache and logs; reruns resume unfinished nodes. Only complete runs outside debug mode clean up artifacts. Input archiving adds a numeric suffix on collisions and preserves both files.
 
 Optional PDF setting:
 
@@ -298,6 +296,19 @@ Add the flag:
 ```bash
 --debug
 ```
+
+## Development and Testing
+
+Node.js 20.18.1+ is required.
+
+```bash
+npm ci
+npm test              # Node unit tests and workflow fixtures
+npm run lint
+npm run test:python   # Requires PyMuPDF/pikepdf; skips when fixtures are absent
+```
+
+See [docs/architecture.md](./docs/architecture.md) for the architecture and cleanup policy.
 
 ## Project Structure
 

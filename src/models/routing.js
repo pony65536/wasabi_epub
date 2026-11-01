@@ -50,8 +50,9 @@ export const resolveModelRouting = ({
     env = process.env,
     cli = {},
     sourceLanguage,
+    config: loadedConfig = null,
 } = {}) => {
-    const config = loadModelConfig({ projectRoot, env, sourceLanguage });
+    const config = loadedConfig || loadModelConfig({ projectRoot, env, sourceLanguage });
     const warnings = [...(config.legacyWarnings || [])];
     const stages = {};
 
@@ -109,6 +110,7 @@ export const resolveModelRouting = ({
 
     const fingerprint = computeRoutingFingerprint(stages, {
         fallbackOnContentPolicy: config.routing.fallbackOnContentPolicy,
+        fallbackCategories: config.routing.fallbackCategories,
     });
 
     return {
@@ -118,6 +120,7 @@ export const resolveModelRouting = ({
         fallback: config.routing.fallback ?? null,
         fallbackOnContentPolicy:
             config.routing.fallbackOnContentPolicy ?? true,
+        fallbackCategories: config.routing.fallbackCategories,
         stages,
         fingerprint,
         warnings,
@@ -167,7 +170,7 @@ const canonicalStage = (stage) =>
  */
 export const computeRoutingFingerprint = (
     stages,
-    { fallbackOnContentPolicy = true } = {},
+    { fallbackOnContentPolicy = true, fallbackCategories = null } = {},
 ) => {
     const canonicalStages = {};
     for (const stage of MODEL_STAGES) {
@@ -180,6 +183,7 @@ export const computeRoutingFingerprint = (
                 adapterVersion: ADAPTER_VERSION,
                 configVersion: MODEL_CONFIG_VERSION,
                 fallbackOnContentPolicy: Boolean(fallbackOnContentPolicy),
+                fallbackCategories,
                 stages: canonicalStages,
             }),
         )

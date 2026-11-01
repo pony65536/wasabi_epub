@@ -2281,6 +2281,11 @@ export const performTranslation = async (
         failedChapters,
         partialChapters,
         chapters,
+        total: chapters.length,
+        skipped,
+        translated: chapters.filter((chapter) => chapter.status === "complete" && !chapter.cached).length,
+        failed: failedChapters.length,
+        failedIds: failedChapters.map((chapter) => chapter.id),
     };
 };
 

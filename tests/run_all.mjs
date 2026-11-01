@@ -10,6 +10,7 @@ const hasBookSamples = fs
     .some((name) => name.endsWith(".epub"));
 
 const suites = [
+    { name: "upstream and integration unit tests", file: "run_unit.mjs" },
     { name: "content classifier", file: "test_content_classifier.mjs" },
     { name: "structure fidelity", file: "test_structure_fidelity.mjs" },
     { name: "recovery contracts", file: "test_recovery_contracts.mjs" },

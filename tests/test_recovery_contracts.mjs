@@ -196,19 +196,17 @@ const run = async () => {
     });
     await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
     const port = server.address().port;
-    const provider = createAIProvider(
-        "qwen",
-        {
-            qwen: {
+    const provider = createAIProvider({
+        primaryModel: {
+                id: "qwen", sdk: "openai",
                 apiKey: "test-key",
                 baseURL: `http://127.0.0.1:${port}/v1`,
                 modelName: "test-model",
                 timeoutMs: 300,
                 concurrency: 1,
-            },
         },
-        { write: () => {} },
-    );
+        logger: { write: () => {} },
+    });
     let timedOut = false;
     try {
         await provider.callAI("hello", "system");

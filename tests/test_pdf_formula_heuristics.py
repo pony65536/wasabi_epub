@@ -7,36 +7,72 @@ from copy import deepcopy
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PDF_SRC = REPO_ROOT / "src" / "pdf"
+FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures" / "pdf"
 if str(PDF_SRC) not in sys.path:
     sys.path.insert(0, str(PDF_SRC))
 
-from domain import core, preservation, rendering  # noqa: E402
-from services.pdf_extract_impl import (  # noqa: E402
-    _promote_composite_symbol_candidate_blocks,
-    _promote_monospace_parameter_blocks,
-    _promote_small_superscript_tick_labels,
-    _promote_table_headers,
-)
-from services.pdf_fill_impl import resolve_block_action  # noqa: E402
-import detect_tables  # noqa: E402
+try:
+    from domain import core, preservation, rendering  # noqa: E402
+    from services.pdf_extract_impl import (  # noqa: E402
+        _promote_composite_symbol_candidate_blocks,
+        _promote_monospace_parameter_blocks,
+        _promote_small_superscript_tick_labels,
+        _promote_table_headers,
+    )
+    from services.pdf_fill_impl import resolve_block_action  # noqa: E402
+    import detect_tables  # noqa: E402
+
+    PDF_IMPORT_ERROR = None
+except ModuleNotFoundError as exc:  # pragma: no cover
+    PDF_IMPORT_ERROR = exc
+    core = preservation = rendering = None
+    _promote_composite_symbol_candidate_blocks = None
+    _promote_monospace_parameter_blocks = None
+    _promote_small_superscript_tick_labels = None
+    _promote_table_headers = None
+    resolve_block_action = None
+    detect_tables = None
+
+FIXTURE_FILES = {
+    "blocks": FIXTURES_DIR / "pdf_blocks_translated.json",
+    "paper": FIXTURES_DIR / "2605.08083v1_tables_from_pdf.json",
+    "transformer": FIXTURES_DIR / "1706.03762v7_tables.json",
+    "fbmap": FIXTURES_DIR / "Functional_Brain_Mapping_and_Its_Applica_tables_latest.json",
+    "nihms": FIXTURES_DIR / "nihms-984751_tables_latest.json",
+}
 
 
 class FormulaHeuristicsTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.cache_path = REPO_ROOT / ".cache_2605.08083v1_pdf" / "pdf_blocks_translated.json"
+        if PDF_IMPORT_ERROR is not None:
+            raise unittest.SkipTest(
+                f"PDF test dependencies are unavailable: {PDF_IMPORT_ERROR}"
+            )
+
+        missing = [
+            str(path.relative_to(REPO_ROOT))
+            for path in FIXTURE_FILES.values()
+            if not path.exists()
+        ]
+        if missing:
+            raise unittest.SkipTest(
+                "Missing PDF fixtures: " + ", ".join(missing)
+            )
+
+        cls.cache_path = FIXTURE_FILES["blocks"]
         cls.cache_payload = json.loads(cls.cache_path.read_text(encoding="utf-8"))
         cls.paper_table_detection = json.loads(
-            (REPO_ROOT / "output" / "2605.08083v1_tables_from_pdf.json").read_text(encoding="utf-8")
+            FIXTURE_FILES["paper"].read_text(encoding="utf-8")
         )
         cls.transformer_table_detection = json.loads(
-            (REPO_ROOT / "output" / "1706.03762v7_tables.json").read_text(encoding="utf-8")
+            FIXTURE_FILES["transformer"].read_text(encoding="utf-8")
         )
         cls.fbmap_table_detection = json.loads(
-            (REPO_ROOT / "output" / "Functional_Brain_Mapping_and_Its_Applica_tables_latest.json").read_text(encoding="utf-8")
+            FIXTURE_FILES["fbmap"].read_text(encoding="utf-8")
         )
         cls.nihms_table_detection = json.loads(
-            (REPO_ROOT / "output" / "nihms-984751_tables_latest.json").read_text(encoding="utf-8")
+            FIXTURE_FILES["nihms"].read_text(encoding="utf-8")
         )
         cls.p2_b2 = next(block for block in cls.cache_payload["blocks"] if block.get("id") == "p2_b2")
         cls.page6_blocks = [deepcopy(block) for block in cls.cache_payload["blocks"] if block.get("page") == 6]

@@ -140,7 +140,7 @@ export const createModelGateway = ({
     };
 
     const getAdapter = (config) => {
-        const key = `${config.connectionName}:${config.model.model}`;
+        const key = `${config.connectionName}:${config.modelName}`;
         if (!adapters.has(key)) {
             adapters.set(
                 key,
@@ -256,6 +256,7 @@ export const createModelGateway = ({
         const fallbackAllowed =
             Boolean(stageConfig.fallback) &&
             FALLBACK_CATEGORIES.has(category) &&
+            (!routing.fallbackCategories || routing.fallbackCategories.includes(category)) &&
             (category !== "content_policy" ||
                 routing.fallbackOnContentPolicy !== false);
 

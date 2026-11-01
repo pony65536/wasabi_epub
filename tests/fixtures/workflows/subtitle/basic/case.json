@@ -1,0 +1,10 @@
+{
+    "format": "subtitle",
+    "inputPath": "source/doc.srt",
+    "cacheDirName": ".cache_doc_subtitle",
+    "expectedOutput": "expected/doc_zh.srt",
+    "outputName": "doc_zh.srt",
+    "jobOptions": {
+        "sourceLanguageExplicit": true
+    }
+}

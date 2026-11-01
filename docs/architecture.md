@@ -16,24 +16,35 @@ Wasabi 是一个面向长文档与字幕场景的命令行翻译工具。它统�
 CLI / Runtime
   index.js
     ->
-Core Orchestration
-  src/core.js
+Dispatch
+  src/core.js                      # 仅保留 4 个兼容导出
     ->
-Content Pipelines
-  EPUB / HTML / PDF / Subtitle / Video
+Format Orchestrators
+  src/epub/translationJob.js
+  src/html/translationJob.js
+  src/pdf/translationJob.js
+  src/subtitle/translationJob.js
+    ->
+Shared Pipeline
+  src/pipeline/jobContext.js
+  src/pipeline/translateDocument.js
+  src/pipeline/artifactPolicy.js
     ->
 Translation Engine
   src/translation/*
   src/content/*
     ->
-Provider Abstraction
+Model Gateway / SDK
+  src/models/gateway.js
   src/translation/aiProvider.js
+  src/translation/sdk/*
     ->
 External Services
   Gemini / Qwen / Mimo / OpenRouter
 
 PDF Special Path
-  src/core.js
+  src/pdf/translationJob.js
+    -> src/pdf/repair.js
     -> src/pdf/pdfBridge.js
     -> src/pdf/translate_pdf.py
     -> src/pdf/app|services|domain|infra
@@ -45,17 +56,22 @@ PDF Special Path
 .
 ├─ index.js                  # CLI 入口
 ├─ src/
-│  ├─ core.js                # 各类输入的主编排
+│  ├─ core.js                # 薄分发层，只导出四个格式入口
 │  ├─ config.js              # Provider、模型、语言与运行时配置
 │  ├─ agent.js               # EPUB 章节顺序规划
 │  ├─ utils.js               # 通用工具与 AI 调用辅助
-│  ├─ translation/           # 翻译执行引擎、队列与 provider 适配
+│  ├─ pipeline/              # 任务上下文、共享翻译内核、产物保留策略
+│  ├─ models/                # 阶段路由、共享限流、错误分类、用量与连接适配
+│  ├─ translation/           # 翻译执行引擎、队列、provider 与术语 provider
 │  ├─ content/               # 术语、标题、内容分类等增强能力
-│  ├─ support/               # 缓存、日志、环境检查、选择器解析
-│  ├─ epub/                  # EPUB TOC 同步与保存
-│  ├─ subtitle/              # SRT/视频字幕处理
-│  └─ pdf/                   # PDF 子系统（Node + Python）
+│  ├─ support/               # 缓存、日志、文件、命名、环境检查、选择器
+│  ├─ epub/                  # EPUB job、chapterMap、TOC 同步与保存
+│  ├─ html/                  # HTML job
+│  ├─ subtitle/              # 字幕 job 与 SRT/视频处理
+│  └─ pdf/                   # PDF job、repair、HTML 映射与 Python 子系统
+├─ config/                   # 模型登记与选型（example 提交，local 忽略）
 ├─ prompts/                  # 各模式 Prompt 模板
+├─ tests/                    # Node 单测、工作流 fixture 与 Python 测试
 ├─ input/                    # 输入文件归档目录
 ├─ output/                   # 最终输出目录
 ├─ log/                      # 调试日志目录
@@ -65,7 +81,8 @@ PDF Special Path
 ## 4. 核心设计原则
 
 - 单入口，多工作流：所有模式统一从 `index.js` 进入，再按扩展名分派。
-- 编排与实现分离：`src/core.js` 负责流程控制，具体解析/保存/字幕/PDF 能力下沉到子模块。
+- 薄分发 + 格式编排：`src/core.js` 只做兼容导出；每种格式的生命周期放在各自的 `translationJob.js`。
+- 共享边界显式化：目录/日志/provider/队列/缓存的初始化集中在 `pipeline/jobContext.js`，翻译主循环集中在 `pipeline/translateDocument.js`。
 - Provider 抽象统一：不同模型供应商通过统一 `callAI` 接口接入。
 - 中间表示驱动：HTML、PDF、字幕都尽量转换为可翻译的中间结构后再走统一翻译引擎。
 - 缓存优先：章节、术语表、翻译计划、PDF 提取结果都可复用，支持断点续跑。
@@ -78,7 +95,7 @@ PDF Special Path
 `index.js` 负责：
 
 - 解析命令：`translate`、`doctor`、`setup --pdf`
-- 解析参数：`--chap`、`--page`、`--from`、`--to`、`--concurrency`、`--debug`
+- 解析参数：`--chap`、`--page`、`--from`、`--to`、`--model`、`--concurrency`、`--debug`
 - 根据输入扩展名选择后端
 - 在执行前做环境预检查
 - 在 PDF 模式下按需触发 Python 依赖安装
@@ -93,71 +110,47 @@ PDF Special Path
 - 输出 `doctor` 报告
 - 统一格式化环境错误信息
 
-### 5.3 主编排层
+### 5.3 分发与编排
 
-`src/core.js` 是系统的主调度器，暴露四类入口：
+`src/core.js` 只保留四个兼容导出，实际流程位于：
 
-- `runTranslationJob`：EPUB（含 Step 0 Director Agent 全书导演先导、TOC 排序、规则分析、术语表提取、并发翻译、排版修复与最终打包）
-- `runHtmlTranslationJob`：HTML
-- `runPdfTranslationJob`：PDF
-- `runSubtitleTranslationJob`：SRT / 视频字幕
+- `src/epub/translationJob.js`：`runTranslationJob`
+- `src/html/translationJob.js`：`runHtmlTranslationJob`
+- `src/pdf/translationJob.js`：`runPdfTranslationJob`
+- `src/subtitle/translationJob.js`：`runSubtitleTranslationJob`
 
-它的职责包括：
+共享模块：
 
-- 建立 `input/`、`output/`、`log/`、`.cache_*`
-- 创建 logger、provider、batch queue、cache
-- 决定是否复用缓存（包含 Book Bible、Plan、Glossary、Heading 规则）
-- 串联术语生成、正文翻译、后处理、输出保存
-- 结束后根据 `--debug` 决定是否清理缓存和日志
+- `src/pipeline/jobContext.js`：建立 `input/`、`output/`、`log/`、`.cache_*`，创建 logger、共享 gateway、各阶段 provider、batch queue 和带任务锁的 cache，并提供 banner 与结束清理
+- `src/pipeline/translateDocument.js`：各格式共用的翻译与队列收敛入口；缓存有效性及节点级恢复统一交给 translator 判断
+- `src/pipeline/artifactPolicy.js`：成功/失败、debug on/off 下的缓存与日志保留策略
 
-### 5.4 智能体驱动与排版保护架构（Agentic Workflow & Inline Slots）
+职责划分：
 
-系统针对长篇长文档图书翻译引入了**分层多智能体协同（Autonomous Translation Studio）与行内排版占位符系统**：
-
-1. **内存级 EPUB 智能自愈与重构（In-Memory EPUB Doctor, `src/epub/epubDoctor.js`）**：
-   - 解决早年转换书、OCR 盗版抓取书常有的“全书 50 万字塞在两三个大文件里、全书无 `<h1>-<h6>` 仅有 `<p class="calibre">`”的非标假章节痛点。
-   - **零重复磁盘 I/O 探针**：在读取 ZIP 目录后就地在内存中体检 `chapterMap`。检测到超大异常文件时，自动通过语义断点探测算法（模式识别章节序数与标题特征）将单个超大假章节无损切分为合法的多个标准小章节，规范化注入 `<h1>` 标签，并原地更新 `chapterMap` 与 `content.opf`。
-   - 后续的 Director Agent、并发翻译、缓存持久化直接基于清晰干净的细粒度章节运转，断点续跑粒度大幅提升。
-2. **全书导演（Director Agent, `src/content/director.js`）**：
-   - 处于 EPUB 主流程的 **Step 0**。在全书动工前，分层抽样全书骨架（跳过封面、TOC、版权等非实质页），一次性萃取全书的文体风格（Tone）、角色表与人称代词（Character Bible，杜绝男女代词乱飘）、世界观核心专有名词（Worldview）。
-   - 产物结构化持久化至 `.cache/book_bible.json`，供人工二次审核或断点续跑，并作为全局约束动态挂载注入所有批次翻译 Prompt。
-2. **动态生长记忆中枢（Living Memory Store, `src/content/memory.js`）**：
-   - 取代原有死板的词频统计词表，在每章翻译完成后由 Extractor Agent 异步提炼本章新出现的人物变迁、专有名词与统一称谓。
-   - 自动去重合并入 Book Bible 快照，实现全书跨章节“越翻越准、前后呼应”的自生长记忆体系。
-3. **门控反思审校智能体（Gated Critic Agent, `src/content/critic.js`）**：
-   - 解决单次成稿（Single-pass）造成的漏译与生硬直译。
-   - 采用**门禁机制（Gating）**节约 70% 额外开销：仅当检测到初译文本包含【译者注】、长句漏译嫌疑（长度比异常失衡）或生硬直译时激活审查与定向纠错重写。
-4. **文化特异性与 EPUB 3 弹窗译者注（Cultural Annotations & Footnotes, `src/content/footnotes.js`）**：
-   - 针对双关语、典故、拉丁文格言等文化隔阂，引导模型生成轻量 `<ws-note term="...">`。
-   - 由装配器转换为标准 EPUB 3 脚注语义（`<aside epub:type="footnote">`），在微信读书、Apple Books 等现代阅读器中实现**点击角标原生弹窗浮层阅读**，阅读体验比肩正规出版物。
-5. **前文上下文轻量回溯检索器（Context Retriever, `src/content/retriever.js`）**：
-   - 维护已翻译章节的倒排段落索引，遇到长距离代词迷雾或剧情伏笔时支持即时检索前文线索。
-6. **行内排版占位符架构（Inline Tag Placeholders, `src/content/inlineSlots.js`）**：
-   - 解决大模型面对复杂行内标签（`<a>`, `<em>`, `<strong>`, `<sup>` 等）时容易篡改 URL、丢失属性或在中文倒装语序中打乱闭合的顽疾。
-   - **独占命名空间与 Nonce 探针**：采用 `<ws-slot id="N">` 格式，检测到正文代码冲突时自动加盐升版；
-   - **白名单查表还原与容错**：只认当前批次发出的 slot ID，正文类似文本原样不动；递归内层优先解码，自动修复漏闭合标签。
+- 格式 job 负责计算输出名、选择缓存模式、准备 glossary/plan/heading，并在翻译后执行格式专属的 apply/save
+- 格式 job 不再直接创建 logger、主 provider、batch queue 或 cache
+- 输入文件仅在任务成功后归档到 `input/`
+- EPUB、HTML、PDF 在初始化时创建 glossary provider；字幕延迟到语言推断后创建
 
 ## 6. 翻译引擎
 
 ### 6.1 Provider 抽象
 
-`src/translation/aiProvider.js` 封装所有模型调用差异：
+`src/models/gateway.js` 编排阶段调用、全局/连接双层限流、重试预算、fallback 与用量统计。`src/translation/aiProvider.js` 保留独立 provider 接口；两者共用 `src/translation/sdk/*`：
 
-- `gemini` 使用 `@google/generative-ai`
-- `qwen`、`mimo`、`openrouter` 统一走 OpenAI 兼容接口
-- 主 Provider 调用失败时，如果命中内容安全策略，可自动回退到 fallback provider
-- **中转站协议与 SSE 流式自适应兼容（最新演进）**：
-  - 针对各类第三方聚合中转站（NewAPI / OneAPI / 社区中转站）在开启 `response_format: { type: "json_object" }` 时强行返回 Server-Sent Events (SSE) `data: {"delta": ...}` 导致客户端挂起或超时的问题，内置自动解包、流式重组与合并机制，保证 JSON 模式在任何第三方中转站上稳定极速返回。
-- 对废弃模型、不可用模型追加更明确的配置提示
+- SDK 由模型条目的 `sdk` 决定：`openai` 或 `@google/generative-ai`
+- JSON 配置默认在内容安全错误时 fallback；可通过 `onErrors` 扩展类别，按阶段覆盖或禁用候补
+- 对废弃模型追加指向 `config/wasabi.local.json` 模型条目的提示
 
-运行时配置由 `src/config.js` 生成，支持：
+运行时配置由 `src/config.js` 的 `loadRuntimeConfig` 生成：
 
-- 主 provider / fallback provider
-- 模型名覆盖
-- 并发数覆盖
-- OpenRouter reasoning 开关
-- 术语表专用模型配置
-- 自定义 Base URL 与第三方中转站直连接入
+- 读取 `config/wasabi.local.json`，或由 `WASABI_CONFIG` 指定路径
+- 校验模型登记、SDK、URL、`requestOptions` 与 `selection` 引用
+- 解析 `primary`、可选 `fallback`、`glossary.default`、`stages`、`stageFallback`、`stageRequirements`，再生成统一的连接/模型路由
+- 俄/日 glossary 模型只保存 ID，在源语言确定后再解析 Key
+- `--concurrency` 只覆盖本次运行，不回写配置
+- 网关和独立 facade 各自承担其调用路径的超时取消；SDK 不额外重试，响应解析拒绝空正文与截断内容
+- JSON 为主要入口，旧模型文件与环境配置经适配后复用同一运行时；显式配置错误直接报错
 
 ### 6.2 批处理与重试
 
@@ -232,10 +225,12 @@ EPUB 流程大致如下：
 
 相关模块：
 
-- `src/core.js`
+- `src/epub/translationJob.js`
+- `src/epub/chapterMap.js`
 - `src/agent.js`
 - `src/epub/tocSync.js`
 - `src/epub/epubSaver.js`
+- `src/pipeline/translateDocument.js`
 
 ### 8.2 HTML
 
@@ -249,18 +244,23 @@ HTML 是最轻量的路径：
 
 它复用了大部分通用翻译引擎，只是不需要 EPUB 的目录同步和打包。
 
+相关模块：
+
+- `src/html/translationJob.js`
+- `src/pipeline/translateDocument.js`
+
 ### 8.3 PDF
 
 PDF 是最复杂的一条链路，采用 Node + Python 双层架构。
 
 Node 侧：
 
-1. `src/core.js` 创建 cache 和输出路径
+1. `src/pdf/translationJob.js` 创建 cache 和输出路径
 2. `src/pdf/pdfBridge.js` 调用 Python CLI
 3. Python 将 PDF 提取为 JSON block 结构
 4. Node 把 JSON 转成 HTML 中间表示并复用统一翻译引擎
 5. 翻译后的 HTML 再映射回 PDF JSON
-6. 执行额外的 PDF block repair
+6. `src/pdf/repair.js` 执行额外的 PDF block repair
 7. 再调用 Python 将翻译文本回填成 PDF
 
 Python 侧分层：
@@ -292,8 +292,9 @@ SRT 流程：
 
 相关模块：
 
+- `src/subtitle/translationJob.js`
 - `src/subtitle/srt.js`
-- `src/core.js`
+- `src/pipeline/translateDocument.js`
 
 ### 8.5 视频字幕
 
@@ -308,6 +309,7 @@ SRT 流程：
 
 相关模块：
 
+- `src/subtitle/translationJob.js`
 - `src/subtitle/video.js`
 - `src/subtitle/language.js`
 
@@ -324,7 +326,7 @@ SRT 流程：
 - PDF 提取 JSON、翻译后 JSON
 - 字幕抽取文件与 JSON
 
-缓存目录采用 `.cache_*` 命名，按输入文件或选择器区分。
+缓存目录采用 `.cache_*` 命名，按输入文件、目标语言和选择器区分。`task_meta.json` 校验源内容、语言、提示词、修复与模型路由；`chapter_status.json` 校验流程版本、HTML 摘要、失败节点和覆盖缺口。无签名旧缓存不能直接复用，损坏 JSON 会隔离后重建。`task.lock` 防止并行任务修改同一缓存。
 
 ### 9.2 日志
 
@@ -335,13 +337,20 @@ SRT 流程：
 - glossary 与 heading 相关中间数据
 - 外部进程标准输出与错误输出
 
-默认非 `--debug` 模式会自动清理日志；调试模式下保留。
+清理策略统一由 `src/pipeline/artifactPolicy.js` 决定：
+
+| 格式 | 成功、非 debug | 成功、debug | 失败、非 debug | 失败、debug |
+|---|---|---|---|---|
+| EPUB / HTML | 删除 cache/log | 保留 | 保留 cache/log | 保留 |
+| PDF / 字幕 | 删除 cache/log | 保留 | 保留 cache/log | 保留 |
+
+部分完成或验证未通过也会保留 cache/log。退出时释放任务锁，后续任务可以恢复未完成节点。
 
 ### 9.3 输入输出约定
 
 - 输入文件可从项目根目录或 `input/` 读取
 - 成功后产物写入 `output/`
-- 原始输入文件会被移动到 `input/`
+- 原始输入文件会被移动到 `input/`，目标同名时追加序号保留两份
 
 这套约定让 CLI 使用和批量归档更简单，但也意味着它不是“纯只读”处理工具。
 
@@ -387,20 +396,20 @@ SRT 流程：
 
 ## 13. 当前架构权衡与风险
 
-- `src/core.js` 体量较大，仍是显著的编排中心，后续继续扩展时容易膨胀
+- 四种格式仍保留各自的 orchestrator；共享的是上下文与翻译内核，apply/save 仍按格式分开
 - 翻译引擎高度依赖 prompt 与启发式，行为稳定性受模型变化影响较大
 - HTML/EPUB 的“可翻译节点判定”规则较复杂，修改时需要小心回归
 - PDF 仍然是最脆弱链路，跨语言回填、块边界恢复、字体覆盖都可能受样本影响
 - 视频字幕依赖本机工具链与字幕轨质量，环境差异明显
-- 当前缓存文件较多，但缺少更强的版本化约束，旧缓存命中时需要谨慎
+- 旧缓存缺少签名或版本状态时会重建，首次升级可能需要重新翻译
 
 ## 14. 建议的后续演进方向
 
-- 将 `src/core.js` 进一步拆成按输入类型分离的 orchestrator
 - 为中间表示定义更明确的数据契约，减少 HTML/JSON 来回映射的隐式假设
-- 给缓存引入更清晰的 schema version 与失效机制
-- 为 EPUB/HTML/字幕工作流补充更系统的回归样本
+- 持续维护缓存协议版本、身份指纹与迁移回归
+- 为 EPUB/PDF 工作流补充与 HTML/字幕同等规模的无网络回归样本
 - 继续压缩 PDF Python 子系统中仍然偏大的共享模块
+- 暂不引入通用 adapter runner：字幕的 preload、PDF 的 validate、EPUB 的 TOC/NCX 仍需要明显的格式专属阶段；如果新增第五种格式再重新评估
 
 ## 15. 新开发者阅读顺序
 
@@ -408,42 +417,22 @@ SRT 流程：
 
 1. `README.md`
 2. `index.js`
-3. `src/core.js`
-4. `src/config.js`
-5. `src/translation/translator.js`
-6. `src/translation/aiProvider.js`
-7. `src/content/glossary.js`
-8. `src/subtitle/video.js`
-9. `src/pdf/README.md`
-10. `src/pdf/pdfBridge.js` 与 `src/pdf/translate_pdf.py`
+3. `src/core.js` 与 `src/pipeline/jobContext.js`
+4. `src/pipeline/translateDocument.js`
+5. 任一格式的 `translationJob.js`（建议从 `src/html/` 开始）
+6. `src/config.js` 与 `config/wasabi.example.json`
+7. `src/translation/translator.js`
+8. `src/models/gateway.js`、`src/models/routing.js` 与 `src/translation/aiProvider.js`
+9. `src/translation/sdk/*`
+10. `src/content/glossary.js`
+11. `src/subtitle/video.js`
+12. `src/pdf/README.md`
+13. `src/pdf/pdfBridge.js` 与 `src/pdf/translate_pdf.py`
 
 这样能先理解系统边界，再进入各个复杂子模块。
 
-## 16. 任务契约与状态模块（2026-10 起）
+## 16. EPUB 增强与合并回归
 
-为解决「请求结束 ≠ 翻译完成 ≠ 输出合格」的混淆，新增三层显式契约：
+EPUB 任务在 chapter map 建立后运行 Doctor，在内存中修复超大/非标准章节，再按 OPF spine 建立阅读顺序。Planner 先确定角色与顺序，Director 基于正文生成 Book Bible；正文阶段积累 Living Memory 与双语检索上下文后，再翻译前置材料。Inline Slots、结构保护、覆盖审计和脚注处理保留在共享翻译引擎中。保存前重写并验证内部链接及 HTML/NCX 目录。
 
-### 16.1 内容契约
-
-- `src/content/content-classifier.js`：Unicode 判定（`\p{L}/\p{N}/\p{S}/\p{P}`），输出 `action`（兼容）与 `decision`（`translate/preserve/uncertain`）。
-- `src/translation/coverage.js`：逐单元覆盖率审计；可疑保留项计入 `gaps`，有 gap 不得 complete。
-- `src/translation/structureGuard.js`：受保护属性（id/href/class/name/src/epub:type）与嵌套关系多重集校验，批量/单节点/Critic 共用。
-- `src/content/inlineSlots.js`：编解码无固定上限，返回 missing/unknown/duplicate/residual 报告。
-
-### 16.2 任务契约
-
-- `src/translation/translator.js`：章节状态 `complete/partial/failed`；`aggregateTranslationResults` 统一 reducer；失败节点保留 `data-t-id` 供续跑；章节窗口调度（默认 4 章一窗）。
-- `src/translation/requestLimiter.js` + `aiProvider.classifyProviderError`：共享限流、超时取消、永久错误快速失败。
-- `src/support/cache.js`：原子写、损坏隔离、章节 `htmlDigest`、任务锁。
-- `src/support/taskIdentity.js`：内容摘要（不含 mtime）+ 快速指纹。
-
-### 16.3 产物契约
-
-- `src/support/jobRuntime.js`：`createJobCache` / `finalizeJobArtifacts` / `buildJobResult`。
-- 四种 Job 返回 `{ translationStatus, validationStatus, counts, outputPath, reportPath, cacheDir, logFile, archivedInputPath }`。
-- 仅 `translation=complete && validation=ok` 清理缓存与日志；否则保留。
-
-### 16.4 验收入口
-
-- `npm test` → `tests/run_all.mjs`：content-classifier / structure-fidelity / recovery-contracts / srt / translation-status / planning-phases / epub-doctor（书籍样本可选跳过）。
-
+`npm test` 显式运行远程 JS 单测、合并交界处集成测试及本地九组审计；有 EPUB 样本时执行真实打包与链接检查。测试夹具包含有效任务签名与章节状态，另有无签名缓存失效、部分完成续跑、共享连接限流、中转 SSE 和同名归档的回归。`npm run lint` 校验 JS，`npm run test:python` 执行 Python 检查；缺少 PDF 依赖或专用 fixture 时按测试说明跳过。

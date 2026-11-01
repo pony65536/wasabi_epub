@@ -1,0 +1,7 @@
+{
+    "format": "html",
+    "inputPath": "source/doc.html",
+    "cacheDirName": ".cache_doc_html",
+    "expectedOutput": "expected/doc_zh.html",
+    "outputName": "doc_zh.html"
+}
